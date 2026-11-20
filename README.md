@@ -18,6 +18,9 @@ Install the complete development dependencies with `python -m pip install -r req
 minicart/
 ├── api-gateway/            # Gateway dependencies (no endpoints yet)
 ├── product-service/        # Product/inventory models and DB access
+│   ├── server.py           # Product Service gRPC server
+│   ├── servicer.py         # Product RPC handlers
+│   └── tests/              # Live gRPC/PostgreSQL integration tests
 ├── order-service/          # Order/order-item models and DB access
 ├── payment-service/        # Payment model and DB access
 ├── protos/                 # Product, order, and payment RPC contracts
@@ -29,6 +32,27 @@ minicart/
 ```
 
 Each service defines its own SQLAlchemy `Base` and owns its tables. The order and payment services intentionally do not declare foreign keys to tables owned by other services. The product inventory table references the product table within its own service.
+
+## Product Service
+
+The Product Service implements the `AddProduct`, `GetProduct`, `CheckStock`, and `UpdateStock` gRPC methods from `protos/product.proto`. Add-product creates the product and its inventory in one transaction. Stock updates lock the inventory row and reject changes that would result in negative stock. `CheckStock` reports `product_exists=false` and zero stock for an unknown product; product retrieval and stock updates return gRPC `NOT_FOUND` for unknown IDs.
+
+Start the server from the project root in Terminal 1:
+
+```powershell
+python product-service/server.py
+```
+
+In Terminal 2, install the project dependencies if needed and run the persistent gRPC integration tests:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m pytest product-service/tests/ -v
+```
+
+The tests require PostgreSQL (`docker compose up -d postgres`) and the Product Service server to be running. They connect using a real gRPC client, verify database persistence, and remove only the uniquely created test products and their inventory records after each test. Set `PRODUCT_SERVICE_ADDRESS` to override the test target (default `127.0.0.1:50051`).
+
+Product Service verification: all 11 gRPC/PostgreSQL integration test cases passed, including validation, inventory creation, stock updates, not-found behavior, and persisted changes.
 
 ## PostgreSQL
 
@@ -47,7 +71,7 @@ Stop the container without removing persistent data:
 docker compose down
 ```
 
-The database listens on local port `5432`; Compose stores its data in the `minicart_postgres_data` named volume. The Python database modules default to `DB_HOST=localhost` for local execution. When a service runs in a Compose network, configure `DB_HOST=postgres`.
+The database listens on local port `5432`; Compose stores its data in the `minicart_postgres_data` named volume. The Python database modules default to `DB_HOST=localhost` for local execution. When a service runs in a Compose network, configure `DB_HOST=postgres`. For an existing volume, the `DB_PASSWORD` must match the password already configured for the database role; changing `.env` alone does not reset that password.
 
 The service tables can be created from each service directory after installing dependencies and configuring `.env`:
 
