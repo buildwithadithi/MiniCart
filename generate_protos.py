@@ -25,6 +25,7 @@ def main() -> None:
             f"-I{PROTO_DIR}",
             f"-I{WELL_KNOWN_PROTO_DIR}",
             f"--python_out={GENERATED_DIR}",
+            f"--pyi_out={GENERATED_DIR}",
             f"--grpc_python_out={GENERATED_DIR}",
             *(str(proto_file) for proto_file in proto_files),
         ]

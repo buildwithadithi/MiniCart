@@ -31,6 +31,8 @@ minicart/
 │   ├── server.py           # Payment Service gRPC server
 │   ├── servicer.py         # Payment RPC handlers
 │   └── tests/              # Live gRPC/PostgreSQL integration tests
+├── tests/
+│   └── e2e/                # Cross-service gRPC/PostgreSQL workflows
 ├── protos/                 # Product, order, and payment RPC contracts
 ├── generated/              # Generated Python protobuf/gRPC package
 ├── docker-compose.yml      # Local PostgreSQL service and named volume
@@ -98,6 +100,29 @@ The tests use real gRPC clients and the running Product and Payment Services. Th
 
 Order workflow caveat: PostgreSQL and the two downstream gRPC services do not share a distributed transaction. If payment succeeds but Product Service subsequently fails to decrement stock, the order remains `PAID` and the RPC reports the stock-update error. With multiple products, a later stock-update failure can also occur after earlier product stocks were decremented. Payment reconciliation, compensation/refunds, and retries are not implemented.
 
+## End-to-end integration tests
+
+Start PostgreSQL and all three services in separate terminals from the project root:
+
+```powershell
+docker compose up -d postgres
+python product-service/server.py
+python order-service/server.py
+python payment-service/server.py
+```
+
+Run the end-to-end workflows from another terminal:
+
+```powershell
+python -m pytest tests/e2e/ -v
+```
+
+These tests use real gRPC clients against ports `50051`, `50052`, and `50053`. The success example creates a product at `19.95` with stock `10`, places an order for `2`, verifies the `39.90` total and actual payment record, and confirms stock falls to `8`. The failure example arranges an odd order ID, then verifies `PAYMENT_FAILED` / `FAILED`, a returned payment ID, and stock remaining at `10`. Parity setup uses disposable orders through the actual gRPC API.
+
+Expected rows during a successful flow: one product and inventory row (stock updated from `10` to `8`), one `PAID` order with its item and payment IDs, and one `SUCCESS` payment for the order total. A failed-payment flow creates the same rows, but stores `PAYMENT_FAILED` / `FAILED` and leaves inventory at `10`. Test-created rows are removed during teardown.
+
+Error coverage includes missing products, insufficient stock, invalid quantities, and Product or Payment Service unavailability. The tests verify records across `products`, `inventory`, `orders`, `order_items`, and `payments`, then delete only records created by the tests. Unavailability cases use isolated temporary Order Service gRPC listeners while calling the real remaining services.
+
 ## Payment Service
 
 The Payment Service implements `ProcessPayment` and `GetPaymentStatus` from `protos/payment.proto`.
@@ -158,7 +183,7 @@ Generate the Python protobuf and gRPC modules into the `generated` package:
 python generate_protos.py
 ```
 
-The generated gRPC modules use package-relative imports so they can be imported as `generated.product_pb2`, `generated.product_pb2_grpc`, and similarly for order and payment.
+The script also generates protobuf `.pyi` files so Pylance can resolve generated message classes. The generated gRPC modules use package-relative imports so they can be imported as `generated.product_pb2`, `generated.product_pb2_grpc`, and similarly for order and payment.
 
 ## Setup verification
 
@@ -169,3 +194,4 @@ The generated gRPC modules use package-relative imports so they can be imported 
 - A temporary persistence marker remained after restarting PostgreSQL; the marker table was removed after the check.
 - Payment Service passed 13 live gRPC/PostgreSQL integration test cases on port `50053`.
 - Order Service passed 12 live gRPC integration test cases, including persisted payment IDs/statuses for successful and failed payments. Existing protobuf field numbers were preserved; Payment Service ran on temporary port `50054` because port `50053` was already occupied.
+- E2E suite passed all 8 live cross-service tests using the existing Payment Service on port `50053`.
