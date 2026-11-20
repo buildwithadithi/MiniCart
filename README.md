@@ -23,6 +23,9 @@ minicart/
 │   └── tests/              # Live gRPC/PostgreSQL integration tests
 ├── order-service/          # Order/order-item models and DB access
 ├── payment-service/        # Payment model and DB access
+│   ├── server.py           # Payment Service gRPC server
+│   ├── servicer.py         # Payment RPC handlers
+│   └── tests/              # Live gRPC/PostgreSQL integration tests
 ├── protos/                 # Product, order, and payment RPC contracts
 ├── generated/              # Generated Python protobuf/gRPC package
 ├── docker-compose.yml      # Local PostgreSQL service and named volume
@@ -53,6 +56,31 @@ python -m pytest product-service/tests/ -v
 The tests require PostgreSQL (`docker compose up -d postgres`) and the Product Service server to be running. They connect using a real gRPC client, verify database persistence, and remove only the uniquely created test products and their inventory records after each test. Set `PRODUCT_SERVICE_ADDRESS` to override the test target (default `127.0.0.1:50051`).
 
 Product Service verification: all 11 gRPC/PostgreSQL integration test cases passed, including validation, inventory creation, stock updates, not-found behavior, and persisted changes.
+
+## Payment Service
+
+The Payment Service implements `ProcessPayment` and `GetPaymentStatus` from `protos/payment.proto`.
+
+Start the server from the project root in Terminal 1:
+
+```powershell
+python payment-service/server.py
+```
+
+The service listens on gRPC port `50053`.
+
+In Terminal 2, run the live gRPC and PostgreSQL integration tests:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m pytest payment-service/tests/ -v
+```
+
+Set `PAYMENT_SERVICE_ADDRESS` to override the test target (default `127.0.0.1:50053`). The tests require PostgreSQL on port `5432` and a running Payment Service.
+
+Payment processing is a deterministic simulation: a positive, even `order_id` produces `SUCCESS`; a positive, odd `order_id` produces `FAILED`. The payment amount must be positive and valid with at most two decimal places. Both successful and failed results are committed to PostgreSQL and can be retrieved with `GetPaymentStatus`.
+
+Test records are assigned unique database IDs. Cleanup removes only the payment records created by the test fixture.
 
 ## PostgreSQL
 
@@ -98,3 +126,4 @@ The generated gRPC modules use package-relative imports so they can be imported 
 - The database contains `products`, `inventory`, `orders`, `order_items`, and `payments`.
 - gRPC code generation completed; all generated protobuf modules, service stubs, servicers, and RPC methods imported successfully.
 - A temporary persistence marker remained after restarting PostgreSQL; the marker table was removed after the check.
+- Payment Service passed 13 live gRPC/PostgreSQL integration test cases on port `50053`.
