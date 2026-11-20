@@ -21,7 +21,12 @@ minicart/
 │   ├── server.py           # Product Service gRPC server
 │   ├── servicer.py         # Product RPC handlers
 │   └── tests/              # Live gRPC/PostgreSQL integration tests
-├── order-service/          # Order/order-item models and DB access
+├── order-service/          # Order service, database access, and gRPC clients
+│   ├── clients/            # Product and Payment Service gRPC clients
+│   ├── migrations/         # Additive Order schema migrations
+│   ├── server.py           # Order Service gRPC server
+│   ├── servicer.py         # Order RPC handlers and workflow
+│   └── tests/              # Live gRPC/PostgreSQL integration tests
 ├── payment-service/        # Payment model and DB access
 │   ├── server.py           # Payment Service gRPC server
 │   ├── servicer.py         # Payment RPC handlers
@@ -56,6 +61,42 @@ python -m pytest product-service/tests/ -v
 The tests require PostgreSQL (`docker compose up -d postgres`) and the Product Service server to be running. They connect using a real gRPC client, verify database persistence, and remove only the uniquely created test products and their inventory records after each test. Set `PRODUCT_SERVICE_ADDRESS` to override the test target (default `127.0.0.1:50051`).
 
 Product Service verification: all 11 gRPC/PostgreSQL integration test cases passed, including validation, inventory creation, stock updates, not-found behavior, and persisted changes.
+
+## Order Service
+
+The Order Service implements `CreateOrder` and `GetOrder` from `protos/order.proto`. It obtains product prices and stock through Product Service gRPC calls, saves the order and item prices in its own database, then calls Payment Service with the generated order ID and calculated total. A successful payment marks the order `PAID` and reduces stock through Product Service; a failed payment marks it `PAYMENT_FAILED` and leaves stock unchanged.
+
+The `unit_price` in the current `OrderItemInput` request is ignored: the Product Service price is authoritative. `Order` responses include the payment ID and Payment Service status (`SUCCESS` or `FAILED`) when a payment was processed. Older orders without payment details return the protobuf defaults.
+
+Existing databases need the additive payment-details migration once. From the project root, run:
+
+```powershell
+Get-Content order-service/migrations/0001_add_payment_details.sql | docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+```
+
+The migration adds nullable columns only and does not create a cross-service foreign key.
+
+Start PostgreSQL and all three services from the project root, each in its own terminal:
+
+```powershell
+docker compose up -d postgres
+python product-service/server.py
+python order-service/server.py
+python payment-service/server.py
+```
+
+Default gRPC ports are Product `50051`, Order `50052`, and Payment `50053`. Set `PRODUCT_SERVICE_ADDRESS` or `PAYMENT_SERVICE_ADDRESS` to override client targets; `PRODUCT_SERVICE_PORT`, `ORDER_SERVICE_PORT`, and `PAYMENT_SERVICE_PORT` configure server/default client ports. Client call timeouts are configurable with `PRODUCT_SERVICE_TIMEOUT_SECONDS` and `PAYMENT_SERVICE_TIMEOUT_SECONDS`.
+
+With all three services running, install dependencies and run the live integration tests:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m pytest order-service/tests/ -v
+```
+
+The tests use real gRPC clients and the running Product and Payment Services. They create uniquely named products and clean up only their own order, payment, product, inventory, and item records. Product and Payment Service outage cases use isolated temporary Order Service gRPC listeners while retaining the real dependent service for the other call.
+
+Order workflow caveat: PostgreSQL and the two downstream gRPC services do not share a distributed transaction. If payment succeeds but Product Service subsequently fails to decrement stock, the order remains `PAID` and the RPC reports the stock-update error. With multiple products, a later stock-update failure can also occur after earlier product stocks were decremented. Payment reconciliation, compensation/refunds, and retries are not implemented.
 
 ## Payment Service
 
@@ -127,3 +168,4 @@ The generated gRPC modules use package-relative imports so they can be imported 
 - gRPC code generation completed; all generated protobuf modules, service stubs, servicers, and RPC methods imported successfully.
 - A temporary persistence marker remained after restarting PostgreSQL; the marker table was removed after the check.
 - Payment Service passed 13 live gRPC/PostgreSQL integration test cases on port `50053`.
+- Order Service passed 12 live gRPC integration test cases, including persisted payment IDs/statuses for successful and failed payments. Existing protobuf field numbers were preserved; Payment Service ran on temporary port `50054` because port `50053` was already occupied.

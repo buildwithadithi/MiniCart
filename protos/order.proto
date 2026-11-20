@@ -23,6 +23,8 @@ message Order {
   string status = 3;
   google.protobuf.Timestamp created_at = 4;
   repeated OrderItem items = 5;
+  int64 payment_id = 6;
+  string payment_status = 7;
 }
 
 message CreateOrderRequest {
