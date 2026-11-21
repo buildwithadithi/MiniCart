@@ -1,5 +1,6 @@
 import logging
 from decimal import Decimal, InvalidOperation
+from typing import NoReturn
 
 import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
@@ -67,7 +68,7 @@ def _abort_downstream(
     service_name: str,
     *,
     order_id: int | None = None,
-) -> None:
+) -> NoReturn:
     code = error.code()
     detail = error.details() or "No additional details."
     message = f"{service_name} request failed: {detail}"
@@ -128,20 +129,32 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
 
         product_prices: dict[int, Decimal] = {}
         for product_id, quantity in required_stock.items():
+            product = None
             try:
                 product = self.product_client.get_product(product_id)
             except grpc.RpcError as error:
                 _abort_downstream(context, error, "Product Service")
+            if product is None:
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    "Product Service returned no product result.",
+                )
 
             try:
                 product_prices[product_id] = _price_from_product(product.price)
             except ValueError as error:
                 context.abort(grpc.StatusCode.DATA_LOSS, str(error))
 
+            stock = None
             try:
                 stock = self.product_client.check_stock(product_id)
             except grpc.RpcError as error:
                 _abort_downstream(context, error, "Product Service")
+            if stock is None:
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    "Product Service returned no stock result.",
+                )
             if not stock.product_exists:
                 context.abort(
                     grpc.StatusCode.NOT_FOUND,
@@ -163,6 +176,7 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
                 "Order total is outside the supported monetary range.",
             )
 
+        order_id: int | None = None
         try:
             with SessionLocal.begin() as session:
                 order = Order(total_amount=total_amount, status="PENDING")
@@ -190,6 +204,14 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
             logger.exception("Unexpected failure while creating an order.")
             context.abort(grpc.StatusCode.INTERNAL, "Unable to create order.")
 
+        if order_id is None:
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                "The order database did not return an order ID.",
+            )
+        assert order_id is not None
+
+        payment = None
         try:
             payment = self.payment_client.process_payment(
                 order_id=order_id,
@@ -202,6 +224,12 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
                 error,
                 "Payment Service",
                 order_id=order_id,
+            )
+
+        if payment is None:
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                "Payment Service returned no payment result.",
             )
 
         if payment.status not in ("SUCCESS", "FAILED") or payment.id <= 0:
@@ -257,7 +285,8 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
                         grpc.StatusCode.NOT_FOUND,
                         f"Order {order_id} was not found.",
                     )
-                order.status = status
+                if order is not None:
+                    order.status = status
         except SQLAlchemyError:
             logger.exception("Database failure while updating order %s.", order_id)
             context.abort(
@@ -281,9 +310,10 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
                         grpc.StatusCode.NOT_FOUND,
                         f"Order {order_id} was not found.",
                     )
-                order.status = status
-                order.payment_id = payment_id
-                order.payment_status = payment_status
+                if order is not None:
+                    order.status = status
+                    order.payment_id = payment_id
+                    order.payment_status = payment_status
         except SQLAlchemyError:
             logger.exception(
                 "Database failure while saving payment details for order %s.",
@@ -296,6 +326,7 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
 
     @staticmethod
     def _get_order_response(order_id: int, context):
+        response = None
         try:
             with SessionLocal.begin() as session:
                 order = session.get(Order, order_id)
