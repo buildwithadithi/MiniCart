@@ -253,6 +253,64 @@ Expected rows during a successful flow: one product and inventory row (stock upd
 
 Error coverage includes missing products, insufficient stock, invalid quantities, and Product or Payment Service unavailability. The tests verify records across `products`, `inventory`, `orders`, `order_items`, and `payments`, then delete only records created by the tests. Unavailability cases use isolated temporary Order Service gRPC listeners while calling the real remaining services.
 
+## Root-level Gateway integration tests
+
+`tests/gateway/` exercises order creation and retrieval through real HTTP requests to the running FastAPI Gateway. The Gateway forwards those requests to the running Order Service over gRPC; Order Service calls the running Product and Payment Services. Tests use direct Product gRPC calls only to create products and verify stock, direct Payment gRPC calls to verify persisted payments, and read-only database queries for persistence checks. The fixtures do not start or stop Docker or application services. Cleanup deletes only orders/items/payments tied to order IDs and uniquely created test products.
+
+Start PostgreSQL and the Product, Order, Payment, and Gateway processes manually in separate terminals as described above. Then, in a root-project terminal:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pytest tests\gateway\ -v
+```
+
+By default the tests use Product `127.0.0.1:50051`, Order `127.0.0.1:50052`, Payment `127.0.0.1:50053`, and Gateway `http://127.0.0.1:8000`. Configure service addresses with the existing `*_SERVICE_ADDRESS` settings (or service host/port settings); set `MINICART_GATEWAY_URL` to override the Gateway URL. Readiness checks fail early with the unavailable component's address.
+
+The Product Service unavailable and Payment Service unavailable cases need extra manually started isolated Order Service and Gateway processes. This avoids disrupting shared services: run the isolated Order instances with distinct ports and one downstream address set to a known-closed local port, then point separate Gateway instances at those Order ports. Configure `MINICART_PRODUCT_UNAVAILABLE_GATEWAY_URL` and `MINICART_PAYMENT_UNAVAILABLE_GATEWAY_URL` in the test terminal. If these URLs are unset, only those two outage tests are skipped.
+
+Example Product Service outage setup (each code block in its own terminal):
+
+```powershell
+$env:ORDER_SERVICE_PORT = "50054"
+$env:PRODUCT_SERVICE_ADDRESS = "127.0.0.1:59991"
+$env:PAYMENT_SERVICE_ADDRESS = "127.0.0.1:50053"
+.\order-service\.venv\Scripts\Activate.ps1
+python order-service/server.py
+```
+
+```powershell
+$env:ORDER_SERVICE_ADDRESS = "127.0.0.1:50054"
+$env:ORDER_SERVICE_TIMEOUT_SECONDS = "10"
+.\api-gateway\.venv\Scripts\Activate.ps1
+python -m uvicorn gateway.main:app --app-dir api-gateway --host 127.0.0.1 --port 8001
+```
+
+Example Payment Service outage setup:
+
+```powershell
+$env:ORDER_SERVICE_PORT = "50055"
+$env:PRODUCT_SERVICE_ADDRESS = "127.0.0.1:50051"
+$env:PAYMENT_SERVICE_ADDRESS = "127.0.0.1:59992"
+.\order-service\.venv\Scripts\Activate.ps1
+python order-service/server.py
+```
+
+```powershell
+$env:ORDER_SERVICE_ADDRESS = "127.0.0.1:50055"
+$env:ORDER_SERVICE_TIMEOUT_SECONDS = "10"
+.\api-gateway\.venv\Scripts\Activate.ps1
+python -m uvicorn gateway.main:app --app-dir api-gateway --host 127.0.0.1 --port 8002
+```
+
+In the terminal running pytest, enable the optional real outage cases:
+
+```powershell
+$env:MINICART_PRODUCT_UNAVAILABLE_GATEWAY_URL = "http://127.0.0.1:8001"
+$env:MINICART_PAYMENT_UNAVAILABLE_GATEWAY_URL = "http://127.0.0.1:8002"
+.\.venv\Scripts\Activate.ps1
+python -m pytest tests\gateway\ -v
+```
+
 ## Payment Service
 
 The Payment Service implements `ProcessPayment` and `GetPaymentStatus` from `protos/payment.proto`.
