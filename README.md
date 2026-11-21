@@ -6,30 +6,34 @@ MiniCart is a Python microservices e-commerce application with service-owned SQL
 
 - Python
 - gRPC and Protocol Buffers for internal service contracts
-- FastAPI and Uvicorn for the future API gateway
+- FastAPI and Uvicorn for the REST API gateway
 - PostgreSQL, SQLAlchemy 2, and psycopg2-binary
 - Docker Compose for local PostgreSQL
 
-Install the complete development dependencies with `python -m pip install -r requirements.txt`. Each service and the API gateway also has its own `requirements.txt`.
+Each component has a separate `requirements.txt`; see [Environment and dependency management](#environment-and-dependency-management) for local setup and Docker instructions.
 
 ## Project structure
 
 ```text
 minicart/
 ├── api-gateway/            # FastAPI REST-to-gRPC API Gateway
+│   ├── Dockerfile          # Gateway image with Gateway-only dependencies
 │   ├── gateway/             # Gateway app, request/response schemas, Order gRPC client
 │   └── tests/               # Isolated API Gateway tests
 ├── product-service/        # Product/inventory models and DB access
+│   ├── Dockerfile          # Product image with Product-only dependencies
 │   ├── server.py           # Product Service gRPC server
 │   ├── servicer.py         # Product RPC handlers
 │   └── tests/              # Live gRPC/PostgreSQL integration tests
 ├── order-service/          # Order service, database access, and gRPC clients
+│   ├── Dockerfile          # Order image with Order-only dependencies
 │   ├── clients/            # Product and Payment Service gRPC clients
 │   ├── migrations/         # Additive Order schema migrations
 │   ├── server.py           # Order Service gRPC server
 │   ├── servicer.py         # Order RPC handlers and workflow
 │   └── tests/              # Live gRPC/PostgreSQL integration tests
 ├── payment-service/        # Payment model and DB access
+│   ├── Dockerfile          # Payment image with Payment-only dependencies
 │   ├── server.py           # Payment Service gRPC server
 │   ├── servicer.py         # Payment RPC handlers
 │   └── tests/              # Live gRPC/PostgreSQL integration tests
@@ -38,6 +42,7 @@ minicart/
 ├── protos/                 # Product, order, and payment RPC contracts
 ├── generated/              # Generated Python protobuf/gRPC package
 ├── docker-compose.yml      # Local PostgreSQL service and named volume
+├── .dockerignore           # Excludes local environments, secrets, and caches
 ├── .env.example            # Placeholder local configuration
 ├── generate_protos.py      # Reproducible gRPC code generation
 └── requirements.txt        # Complete development dependencies
@@ -45,23 +50,100 @@ minicart/
 
 Each service defines its own SQLAlchemy `Base` and owns its tables. The order and payment services intentionally do not declare foreign keys to tables owned by other services. The product inventory table references the product table within its own service.
 
+## Environment and dependency management
+
+MiniCart uses Python 3.13 for local development. Create one virtual environment per independently developed component and one root environment for code generation and cross-service testing. Activate only the environment for the component you are working on. The root requirements are the combined development/test toolset; do not install them into each service environment.
+
+Create all five environments from the project root:
+
+```powershell
+py -3.13 -m venv .venv
+py -3.13 -m venv product-service\.venv
+py -3.13 -m venv order-service\.venv
+py -3.13 -m venv payment-service\.venv
+py -3.13 -m venv api-gateway\.venv
+```
+
+In PowerShell, activate each environment and install only its requirements:
+
+```powershell
+# Root project: code generation and cross-service E2E tests
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip check
+deactivate
+
+# Product Service
+.\product-service\.venv\Scripts\Activate.ps1
+python -m pip install -r product-service\requirements.txt
+python -m pip check
+deactivate
+
+# Order Service
+.\order-service\.venv\Scripts\Activate.ps1
+python -m pip install -r order-service\requirements.txt
+python -m pip check
+deactivate
+
+# Payment Service
+.\payment-service\.venv\Scripts\Activate.ps1
+python -m pip install -r payment-service\requirements.txt
+python -m pip check
+deactivate
+
+# API Gateway
+.\api-gateway\.venv\Scripts\Activate.ps1
+python -m pip install -r api-gateway\requirements.txt
+python -m pip check
+deactivate
+```
+
+The `.venv` directories are Git-ignored. These are local development environments; Docker containers do not create or copy virtual environments.
+
+Generated gRPC code currently requires `grpcio>=1.81.2` and `protobuf>=6.33.5`. Every component that imports generated modules declares those floors. The root code-generation environment uses `grpcio-tools>=1.81.2,<1.82`, matching the checked-in generated-code version; update the tool constraint and regenerate/test the code together when intentionally upgrading it.
+
+Each service image installs from that service's own requirements file. Build from the repository root so the Dockerfile can copy shared generated modules:
+
+```powershell
+docker build -f product-service\Dockerfile -t minicart-product .
+docker build -f order-service\Dockerfile -t minicart-order .
+docker build -f payment-service\Dockerfile -t minicart-payment .
+docker build -f api-gateway\Dockerfile -t minicart-api-gateway .
+```
+
+The root `.dockerignore` excludes local environments, caches, Git data, and `.env`. Pass database credentials and service addresses as container environment configuration; do not bake secrets into an image. The current Compose file starts PostgreSQL only.
+
 ## FastAPI API Gateway
 
 The API Gateway exposes REST endpoints and forwards order operations to the Order Service over gRPC. It does not connect to PostgreSQL or duplicate order workflow logic.
 
-Start PostgreSQL and all three services in separate terminals from the project root:
+Start PostgreSQL from the project root:
 
 ```powershell
 docker compose up -d postgres
+```
+
+Start each gRPC service in a separate terminal after activating its environment:
+
+```powershell
+.\product-service\.venv\Scripts\Activate.ps1
 python product-service/server.py
+```
+
+```powershell
+.\order-service\.venv\Scripts\Activate.ps1
 python order-service/server.py
+```
+
+```powershell
+.\payment-service\.venv\Scripts\Activate.ps1
 python payment-service/server.py
 ```
 
-In another terminal, install the Gateway dependencies and start it:
+In another terminal, activate the Gateway environment and start it:
 
 ```powershell
-python -m pip install -r api-gateway/requirements.txt
+.\api-gateway\.venv\Scripts\Activate.ps1
 python -m uvicorn gateway.main:app --app-dir api-gateway --host 127.0.0.1 --port 8000
 ```
 
@@ -78,7 +160,8 @@ Open Swagger UI at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs). The
 Run the Gateway tests from the project root:
 
 ```powershell
-python -m pytest api-gateway/tests/ -v
+.\api-gateway\.venv\Scripts\Activate.ps1
+python -m pytest api-gateway\tests\ -v
 ```
 
 These tests use a fake Order Service client to verify request/response conversion, REST validation, HTTP error mapping, and Swagger/OpenAPI availability without requiring running microservices.
@@ -87,22 +170,23 @@ These tests use a fake Order Service client to verify request/response conversio
 
 The Product Service implements the `AddProduct`, `GetProduct`, `CheckStock`, and `UpdateStock` gRPC methods from `protos/product.proto`. Add-product creates the product and its inventory in one transaction. Stock updates lock the inventory row and reject changes that would result in negative stock. `CheckStock` reports `product_exists=false` and zero stock for an unknown product; product retrieval and stock updates return gRPC `NOT_FOUND` for unknown IDs.
 
-Start the server from the project root in Terminal 1:
+Start the server from the project root in Terminal 1 after activating its environment:
 
 ```powershell
+.\product-service\.venv\Scripts\Activate.ps1
 python product-service/server.py
 ```
 
-In Terminal 2, install the project dependencies if needed and run the persistent gRPC integration tests:
+In Terminal 2, activate the Product Service environment and run its persistent gRPC integration tests:
 
 ```powershell
-python -m pip install -r requirements.txt
-python -m pytest product-service/tests/ -v
+.\product-service\.venv\Scripts\Activate.ps1
+python -m pytest product-service\tests\ -v
 ```
 
 The tests require PostgreSQL (`docker compose up -d postgres`) and the Product Service server to be running. They connect using a real gRPC client, verify database persistence, and remove only the uniquely created test products and their inventory records after each test. Set `PRODUCT_SERVICE_ADDRESS` to override the test target (default `127.0.0.1:50051`).
 
-Product Service verification: all 11 gRPC/PostgreSQL integration test cases passed, including validation, inventory creation, stock updates, not-found behavior, and persisted changes.
+Earlier Product Service verification: all 11 gRPC/PostgreSQL integration test cases passed, including validation, inventory creation, stock updates, not-found behavior, and persisted changes.
 
 ## Order Service
 
@@ -118,22 +202,36 @@ Get-Content order-service/migrations/0001_add_payment_details.sql | docker compo
 
 The migration adds nullable columns only and does not create a cross-service foreign key.
 
-Start PostgreSQL and all three services from the project root, each in its own terminal:
+Start PostgreSQL from the project root:
 
 ```powershell
 docker compose up -d postgres
+```
+
+Start each service in its own terminal after activating that service's environment:
+
+```powershell
+.\product-service\.venv\Scripts\Activate.ps1
 python product-service/server.py
+```
+
+```powershell
+.\order-service\.venv\Scripts\Activate.ps1
 python order-service/server.py
+```
+
+```powershell
+.\payment-service\.venv\Scripts\Activate.ps1
 python payment-service/server.py
 ```
 
 Default gRPC ports are Product `50051`, Order `50052`, and Payment `50053`. Set `PRODUCT_SERVICE_ADDRESS` or `PAYMENT_SERVICE_ADDRESS` to override client targets; `PRODUCT_SERVICE_PORT`, `ORDER_SERVICE_PORT`, and `PAYMENT_SERVICE_PORT` configure server/default client ports. Client call timeouts are configurable with `PRODUCT_SERVICE_TIMEOUT_SECONDS` and `PAYMENT_SERVICE_TIMEOUT_SECONDS`.
 
-With all three services running, install dependencies and run the live integration tests:
+With all three services running, use the Order Service environment for its live integration tests:
 
 ```powershell
-python -m pip install -r requirements.txt
-python -m pytest order-service/tests/ -v
+.\order-service\.venv\Scripts\Activate.ps1
+python -m pytest order-service\tests\ -v
 ```
 
 The tests use real gRPC clients and the running Product and Payment Services. They create uniquely named products and clean up only their own order, payment, product, inventory, and item records. Product and Payment Service outage cases use isolated temporary Order Service gRPC listeners while retaining the real dependent service for the other call.
@@ -142,19 +240,11 @@ Order workflow caveat: PostgreSQL and the two downstream gRPC services do not sh
 
 ## End-to-end integration tests
 
-Start PostgreSQL and all three services in separate terminals from the project root:
+Start PostgreSQL and the three gRPC services as described in the Order Service section, then run end-to-end workflows using the root environment:
 
 ```powershell
-docker compose up -d postgres
-python product-service/server.py
-python order-service/server.py
-python payment-service/server.py
-```
-
-Run the end-to-end workflows from another terminal:
-
-```powershell
-python -m pytest tests/e2e/ -v
+.\.venv\Scripts\Activate.ps1
+python -m pytest tests\e2e\ -v
 ```
 
 These tests use real gRPC clients against ports `50051`, `50052`, and `50053`. The success example creates a product at `19.95` with stock `10`, places an order for `2`, verifies the `39.90` total and actual payment record, and confirms stock falls to `8`. The failure example arranges an odd order ID, then verifies `PAYMENT_FAILED` / `FAILED`, a returned payment ID, and stock remaining at `10`. Parity setup uses disposable orders through the actual gRPC API.
@@ -167,19 +257,20 @@ Error coverage includes missing products, insufficient stock, invalid quantities
 
 The Payment Service implements `ProcessPayment` and `GetPaymentStatus` from `protos/payment.proto`.
 
-Start the server from the project root in Terminal 1:
+Start the server from the project root in Terminal 1 after activating its environment:
 
 ```powershell
+.\payment-service\.venv\Scripts\Activate.ps1
 python payment-service/server.py
 ```
 
 The service listens on gRPC port `50053`.
 
-In Terminal 2, run the live gRPC and PostgreSQL integration tests:
+In Terminal 2, activate the Payment Service environment and run its live gRPC and PostgreSQL integration tests:
 
 ```powershell
-python -m pip install -r requirements.txt
-python -m pytest payment-service/tests/ -v
+.\payment-service\.venv\Scripts\Activate.ps1
+python -m pytest payment-service\tests\ -v
 ```
 
 Set `PAYMENT_SERVICE_ADDRESS` to override the test target (default `127.0.0.1:50053`). The tests require PostgreSQL on port `5432` and a running Payment Service.
@@ -220,6 +311,7 @@ Run that command once from each of `product-service`, `order-service`, and `paym
 Generate the Python protobuf and gRPC modules into the `generated` package:
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
 python generate_protos.py
 ```
 
@@ -227,11 +319,13 @@ The script also generates protobuf `.pyi` files so Pylance can resolve generated
 
 ## Setup verification
 
+- Dependency setup on Python `3.13.7`: all five isolated environments installed their own requirements, passed `python -m pip check`, and imported the generated modules needed by that project. The API Gateway suite passed all 13 tests.
+- Service and E2E integration test runs were attempted, but the Product (`50051`), Order (`50052`), and Payment (`50053`) servers were unavailable. Docker was also unavailable in this run, so PostgreSQL-backed service tests and Docker image builds could not be verified.
 - PostgreSQL started with Compose and reported healthy on local port `5432`.
 - SQLAlchemy connected from all three service configurations and created their owned tables.
 - The database contains `products`, `inventory`, `orders`, `order_items`, and `payments`.
 - gRPC code generation completed; all generated protobuf modules, service stubs, servicers, and RPC methods imported successfully.
 - A temporary persistence marker remained after restarting PostgreSQL; the marker table was removed after the check.
-- Payment Service passed 13 live gRPC/PostgreSQL integration test cases on port `50053`.
-- Order Service passed 12 live gRPC integration test cases, including persisted payment IDs/statuses for successful and failed payments. Existing protobuf field numbers were preserved; Payment Service ran on temporary port `50054` because port `50053` was already occupied.
-- E2E suite passed all 8 live cross-service tests using the existing Payment Service on port `50053`.
+- Earlier verification: Payment Service passed 13 live gRPC/PostgreSQL integration test cases on port `50053`.
+- Earlier verification: Order Service passed 12 live gRPC integration test cases, including persisted payment IDs/statuses for successful and failed payments. Existing protobuf field numbers were preserved; Payment Service ran on temporary port `50054` because port `50053` was already occupied.
+- Earlier verification: E2E suite passed all 8 live cross-service tests using the existing Payment Service on port `50053`.
