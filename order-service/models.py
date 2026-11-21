@@ -15,6 +15,7 @@ class Order(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     payment_id: Mapped[int | None] = mapped_column(Integer)
     payment_status: Mapped[str | None] = mapped_column(String(32))
+    user_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

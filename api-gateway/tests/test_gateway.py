@@ -7,6 +7,7 @@ from google.protobuf.timestamp_pb2 import Timestamp
 
 from generated import order_pb2
 from gateway.main import create_app
+from gateway.security import JwtVerifier
 
 
 def _order_message() -> order_pb2.Order:
@@ -45,18 +46,23 @@ class FakeOrderClient:
     def __init__(self):
         self.create_request = None
         self.requested_order_id = None
+        self.authorization_token = None
         self.create_error = None
         self.get_error = None
         self.order = _order_message()
 
-    def create_order(self, request: order_pb2.CreateOrderRequest):
+    def create_order(
+        self, request: order_pb2.CreateOrderRequest, authorization_token: str
+    ):
         self.create_request = request
+        self.authorization_token = authorization_token
         if self.create_error is not None:
             raise self.create_error
         return order_pb2.CreateOrderResponse(order=self.order)
 
-    def get_order(self, order_id: int):
+    def get_order(self, order_id: int, authorization_token: str):
         self.requested_order_id = order_id
+        self.authorization_token = authorization_token
         if self.get_error is not None:
             raise self.get_error
         return order_pb2.GetOrderResponse(order=self.order)
@@ -71,8 +77,11 @@ def order_client():
 
 
 @pytest.fixture
-def client(order_client):
-    with TestClient(create_app(order_client)) as test_client:
+def client(order_client, token_verifier, access_token):
+    with TestClient(
+        create_app(order_client, token_verifier=token_verifier)
+    ) as test_client:
+        test_client.headers["Authorization"] = f"Bearer {access_token}"
         yield test_client
 
 
@@ -83,7 +92,9 @@ def test_health_endpoint(client):
     assert response.json() == {"status": "ok"}
 
 
-def test_create_order_converts_request_and_response(client, order_client):
+def test_create_order_converts_request_and_response(
+    client, order_client, access_token
+):
     response = client.post(
         "/orders",
         json={"items": [{"product_id": 12, "quantity": 2}]},
@@ -93,6 +104,7 @@ def test_create_order_converts_request_and_response(client, order_client):
     assert order_client.create_request == order_pb2.CreateOrderRequest(
         items=[order_pb2.OrderItemInput(product_id=12, quantity=2)]
     )
+    assert order_client.authorization_token == access_token
     assert response.json() == {
         "id": 42,
         "total_amount": "39.90",
@@ -111,11 +123,12 @@ def test_create_order_converts_request_and_response(client, order_client):
     }
 
 
-def test_get_order_converts_response(client, order_client):
+def test_get_order_converts_response(client, order_client, access_token):
     response = client.get("/orders/42")
 
     assert response.status_code == 200
     assert order_client.requested_order_id == 42
+    assert order_client.authorization_token == access_token
     assert response.json()["payment_id"] == 88
     assert response.json()["payment_status"] == "SUCCESS"
     assert response.json()["items"][0]["unit_price"] == "19.95"

@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package minicart.auth.v1;
+
+import "google/protobuf/timestamp.proto";
+
+message RegisterRequest {
+  string name = 1;
+  string email = 2;
+  string password = 3;
+}
+
+message RegisterResponse {
+  int64 user_id = 1;
+  string name = 2;
+  string email = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string access_token = 1;
+  string token_type = 2;
+  int64 expires_in = 3;
+}
+
+service AuthService {
+  // Creates a user account with a securely hashed password.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // Verifies user credentials and issues a signed access token.
+  rpc Login(LoginRequest) returns (LoginResponse);
+}

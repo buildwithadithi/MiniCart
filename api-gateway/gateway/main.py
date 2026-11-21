@@ -1,24 +1,56 @@
 import logging
 from contextlib import asynccontextmanager
 from datetime import timezone
-from typing import Callable, TypeVar
+from typing import Callable, Protocol, TypeVar
 
 import grpc
-from fastapi import FastAPI, HTTPException, Path, Request, status
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, Path, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from generated import auth_pb2
 from generated import order_pb2
+from gateway.auth_client import AuthServiceClient
 from gateway.grpc_client import OrderServiceClient
+from gateway.security import JwtVerifier, VerifiedBearer
 from gateway.schemas import (
     CreateOrderRequest,
     HealthResponse,
+    LoginRequest,
+    LoginResponse,
     OrderItemResponse,
     OrderResponse,
+    RegisterRequest,
+    RegisterResponse,
 )
 
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 _MAX_PATH_ORDER_ID = 9223372036854775807
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+class OrderClientProtocol(Protocol):
+    def create_order(
+        self, request: order_pb2.CreateOrderRequest, authorization_token: str
+    ) -> order_pb2.CreateOrderResponse: ...
+
+    def get_order(
+        self, order_id: int, authorization_token: str
+    ) -> order_pb2.GetOrderResponse: ...
+
+    def close(self) -> None: ...
+
+
+class AuthClientProtocol(Protocol):
+    def register(
+        self, request: auth_pb2.RegisterRequest
+    ) -> auth_pb2.RegisterResponse: ...
+
+    def login(self, request: auth_pb2.LoginRequest) -> auth_pb2.LoginResponse: ...
+
+    def close(self) -> None: ...
 
 
 def _http_error(error: grpc.RpcError) -> HTTPException:
@@ -88,6 +120,75 @@ def _call_order_service(operation: Callable[[], _T]) -> _T:
         ) from error
 
 
+def _call_auth_service(operation: Callable[[], _T]) -> _T:
+    try:
+        return operation()
+    except grpc.RpcError as error:
+        errors = {
+            grpc.StatusCode.INVALID_ARGUMENT: (
+                status.HTTP_400_BAD_REQUEST,
+                "The authentication request is invalid.",
+            ),
+            grpc.StatusCode.ALREADY_EXISTS: (
+                status.HTTP_409_CONFLICT,
+                "An account with that email address already exists.",
+            ),
+            grpc.StatusCode.UNAUTHENTICATED: (
+                status.HTTP_401_UNAUTHORIZED,
+                "Invalid email or password.",
+            ),
+            grpc.StatusCode.UNAVAILABLE: (
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "The Authentication Service is unavailable.",
+            ),
+            grpc.StatusCode.DEADLINE_EXCEEDED: (
+                status.HTTP_504_GATEWAY_TIMEOUT,
+                "The Authentication Service request timed out.",
+            ),
+        }
+        http_status, detail = errors.get(
+            error.code(),
+            (
+                status.HTTP_502_BAD_GATEWAY,
+                "The Authentication Service could not complete the request.",
+            ),
+        )
+        raise HTTPException(status_code=http_status, detail=detail) from None
+    except Exception as error:
+        logger.exception("Unexpected error while handling an Authentication Service request.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An internal API Gateway error occurred.",
+        ) from error
+
+
+def _authenticated_bearer(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VerifiedBearer:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A Bearer token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    verifier: JwtVerifier | None = request.app.state.jwt_verifier
+    if verifier is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="JWT verification is not configured.",
+        )
+    try:
+        user_id = verifier.verify(credentials.credentials)
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="The Bearer token is invalid or expired.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+    return VerifiedBearer(user_id=user_id, token=credentials.credentials)
+
+
 def _order_response(order: order_pb2.Order) -> OrderResponse:
     return OrderResponse(
         id=order.id,
@@ -108,25 +209,34 @@ def _order_response(order: order_pb2.Order) -> OrderResponse:
     )
 
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    yield
-    app.state.order_client.close()
+def create_app(
+    order_client: OrderClientProtocol | None = None,
+    auth_client: AuthClientProtocol | None = None,
+    token_verifier: JwtVerifier | None = None,
+) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if app.state.jwt_verifier is None:
+            app.state.jwt_verifier = JwtVerifier.from_environment()
+        yield
+        app.state.order_client.close()
+        app.state.auth_client.close()
 
-
-def create_app(order_client: OrderServiceClient | None = None) -> FastAPI:
     app = FastAPI(
         title="MiniCart API Gateway",
         description=(
-            "REST API for MiniCart orders. Order creation and retrieval are "
+            "REST authentication is delegated to the Authentication Service. "
+            "Protected order operations are verified by the Gateway and "
             "delegated to the Order Service over gRPC."
         ),
         version="1.0.0",
-        lifespan=_lifespan,
+        lifespan=lifespan,
     )
     app.state.order_client = (
         order_client if order_client is not None else OrderServiceClient()
     )
+    app.state.auth_client = auth_client if auth_client is not None else AuthServiceClient()
+    app.state.jwt_verifier = token_verifier
 
     @app.get(
         "/health",
@@ -136,6 +246,60 @@ def create_app(order_client: OrderServiceClient | None = None) -> FastAPI:
     )
     def health() -> HealthResponse:
         return HealthResponse(status="ok")
+
+    @app.post(
+        "/auth/register",
+        response_model=RegisterResponse,
+        status_code=status.HTTP_201_CREATED,
+        summary="Register an account",
+        description="Creates an account through the Authentication Service.",
+        responses={
+            400: {"description": "Registration input is invalid."},
+            409: {"description": "The email address is already registered."},
+            503: {"description": "Authentication Service is unavailable."},
+        },
+    )
+    def register(body: RegisterRequest, request: Request) -> RegisterResponse:
+        response = _call_auth_service(
+            lambda: request.app.state.auth_client.register(
+                auth_pb2.RegisterRequest(
+                    name=body.name,
+                    email=str(body.email),
+                    password=body.password,
+                )
+            )
+        )
+        return RegisterResponse(
+            id=response.user_id,
+            name=response.name,
+            email=response.email,
+            created_at=response.created_at.ToDatetime(tzinfo=timezone.utc),
+        )
+
+    @app.post(
+        "/auth/login",
+        response_model=LoginResponse,
+        summary="Log in",
+        description="Verifies credentials through the Authentication Service and returns a JWT.",
+        responses={
+            401: {"description": "Email or password is invalid."},
+            503: {"description": "Authentication Service is unavailable."},
+        },
+    )
+    def login(body: LoginRequest, request: Request) -> LoginResponse:
+        response = _call_auth_service(
+            lambda: request.app.state.auth_client.login(
+                auth_pb2.LoginRequest(
+                    email=str(body.email),
+                    password=body.password,
+                )
+            )
+        )
+        return LoginResponse(
+            access_token=response.access_token,
+            token_type=response.token_type,
+            expires_in=response.expires_in,
+        )
 
     @app.post(
         "/orders",
@@ -155,7 +319,9 @@ def create_app(order_client: OrderServiceClient | None = None) -> FastAPI:
         },
     )
     def create_order(
-        body: CreateOrderRequest, request: Request
+        body: CreateOrderRequest,
+        request: Request,
+        principal: VerifiedBearer = Depends(_authenticated_bearer),
     ) -> OrderResponse:
         protobuf_request = order_pb2.CreateOrderRequest(
             items=[
@@ -168,7 +334,9 @@ def create_app(order_client: OrderServiceClient | None = None) -> FastAPI:
         )
         return _call_order_service(
             lambda: _order_response(
-                request.app.state.order_client.create_order(protobuf_request).order
+                request.app.state.order_client.create_order(
+                    protobuf_request, principal.token
+                ).order
             )
         )
 
@@ -187,10 +355,13 @@ def create_app(order_client: OrderServiceClient | None = None) -> FastAPI:
     def get_order(
         request: Request,
         order_id: int = Path(gt=0, le=_MAX_PATH_ORDER_ID),
+        principal: VerifiedBearer = Depends(_authenticated_bearer),
     ) -> OrderResponse:
         return _call_order_service(
             lambda: _order_response(
-                request.app.state.order_client.get_order(order_id).order
+                request.app.state.order_client.get_order(
+                    order_id, principal.token
+                ).order
             )
         )
 

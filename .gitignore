@@ -1,4 +1,6 @@
 .env
+auth-service/keys/*.pem
+*.pem
 .venv/
 **/.venv/
 venv/

@@ -24,16 +24,21 @@ class OrderServiceClient:
         self._stub = order_pb2_grpc.OrderServiceStub(self._channel)
 
     def create_order(
-        self, request: order_pb2.CreateOrderRequest
+        self, request: order_pb2.CreateOrderRequest, authorization_token: str
     ) -> order_pb2.CreateOrderResponse:
-        return self._stub.CreateOrder(request, timeout=self.timeout)
+        return self._stub.CreateOrder(
+            request,
+            timeout=self.timeout,
+            metadata=(("authorization", f"Bearer {authorization_token}"),),
+        )
 
     def get_order(
-        self, order_id: int
+        self, order_id: int, authorization_token: str
     ) -> order_pb2.GetOrderResponse:
         return self._stub.GetOrder(
             order_pb2.GetOrderRequest(order_id=order_id),
             timeout=self.timeout,
+            metadata=(("authorization", f"Bearer {authorization_token}"),),
         )
 
     def close(self) -> None:

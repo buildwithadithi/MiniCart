@@ -2,6 +2,7 @@ import os
 import sys
 from concurrent import futures
 from pathlib import Path
+from uuid import uuid4
 
 import grpc
 import pytest
@@ -14,21 +15,20 @@ SERVICE_ROOT = PROJECT_ROOT / "order-service"
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SERVICE_ROOT))
 
-from clients.payment_client import PaymentClient
-from clients.product_client import ProductClient
 from database import SessionLocal, engine
 from models import Order, OrderItem
-from generated import order_pb2_grpc, product_pb2_grpc
-from generated import payment_pb2_grpc
+from generated import auth_pb2, auth_pb2_grpc
+from generated import order_pb2_grpc, payment_pb2_grpc, product_pb2_grpc
 from servicer import OrderServiceServicer
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def require_running_services_and_database():
     addresses = (
         ("Order Service", os.getenv("ORDER_SERVICE_ADDRESS", "127.0.0.1:50052")),
         ("Product Service", os.getenv("PRODUCT_SERVICE_ADDRESS", "127.0.0.1:50051")),
         ("Payment Service", os.getenv("PAYMENT_SERVICE_ADDRESS", "127.0.0.1:50053")),
+        ("Authentication Service", os.getenv("AUTH_SERVICE_ADDRESS", "127.0.0.1:50054")),
     )
     for service_name, address in addresses:
         channel = grpc.insecure_channel(address)
@@ -58,15 +58,82 @@ def require_running_services_and_database():
 
 
 @pytest.fixture(scope="session")
-def order_stub():
+def auth_token(require_running_services_and_database):
+    address = os.getenv("AUTH_SERVICE_ADDRESS", "127.0.0.1:50054")
+    channel = grpc.insecure_channel(address)
+    stub = auth_pb2_grpc.AuthServiceStub(channel)
+    email = f"order-tests-{uuid4().hex}@example.com"
+    password = "order-tests-password-7431"
+    registration = None
+    try:
+        registration = stub.Register(
+            auth_pb2.RegisterRequest(
+                name="Order Service Test User",
+                email=email,
+                password=password,
+            ),
+            timeout=5,
+        )
+        token = stub.Login(
+            auth_pb2.LoginRequest(email=email, password=password),
+            timeout=5,
+        ).access_token
+        yield token
+    finally:
+        channel.close()
+        if registration is not None:
+            with SessionLocal.begin() as session:
+                order_ids = list(
+                    session.execute(
+                        text("SELECT id FROM orders WHERE user_id = :user_id"),
+                        {"user_id": registration.user_id},
+                    ).scalars()
+                )
+                if order_ids:
+                    session.execute(
+                        text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
+                        {"order_ids": order_ids},
+                    )
+                    session.execute(
+                        text("DELETE FROM order_items WHERE order_id = ANY(:order_ids)"),
+                        {"order_ids": order_ids},
+                    )
+                    session.execute(
+                        text("DELETE FROM orders WHERE id = ANY(:order_ids)"),
+                        {"order_ids": order_ids},
+                    )
+                session.execute(
+                    text("DELETE FROM users WHERE id = :user_id"),
+                    {"user_id": registration.user_id},
+                )
+
+
+class AuthenticatedOrderStub:
+    def __init__(self, stub, token):
+        self._stub = stub
+        self._metadata = (("authorization", f"Bearer {token}"),)
+
+    def CreateOrder(self, request, **kwargs):
+        kwargs["metadata"] = self._metadata
+        return self._stub.CreateOrder(request, **kwargs)
+
+    def GetOrder(self, request, **kwargs):
+        kwargs["metadata"] = self._metadata
+        return self._stub.GetOrder(request, **kwargs)
+
+
+@pytest.fixture(scope="session")
+def order_stub(require_running_services_and_database, auth_token):
+    assert require_running_services_and_database is None
     address = os.getenv("ORDER_SERVICE_ADDRESS", "127.0.0.1:50052")
     channel = grpc.insecure_channel(address)
-    yield order_pb2_grpc.OrderServiceStub(channel)
+    yield AuthenticatedOrderStub(order_pb2_grpc.OrderServiceStub(channel), auth_token)
     channel.close()
 
 
 @pytest.fixture(scope="session")
-def product_stub():
+def product_stub(require_running_services_and_database):
+    assert require_running_services_and_database is None
     address = os.getenv("PRODUCT_SERVICE_ADDRESS", "127.0.0.1:50051")
     channel = grpc.insecure_channel(address)
     yield product_pb2_grpc.ProductServiceStub(channel)
@@ -74,7 +141,8 @@ def product_stub():
 
 
 @pytest.fixture(scope="session")
-def payment_stub():
+def payment_stub(require_running_services_and_database):
+    assert require_running_services_and_database is None
     address = os.getenv("PAYMENT_SERVICE_ADDRESS", "127.0.0.1:50053")
     channel = grpc.insecure_channel(address)
     yield payment_pb2_grpc.PaymentServiceStub(channel)
@@ -118,7 +186,8 @@ def test_records():
 
 
 @pytest.fixture
-def start_isolated_order_service():
+def start_isolated_order_service(require_running_services_and_database, auth_token):
+    assert require_running_services_and_database is None
     servers = []
 
     def start(product_address=None, payment_address=None):
@@ -144,7 +213,7 @@ def start_isolated_order_service():
             raise RuntimeError("Isolated Order Service did not become ready.")
 
         servers.append((server, channel, servicer))
-        return order_pb2_grpc.OrderServiceStub(channel)
+        return AuthenticatedOrderStub(order_pb2_grpc.OrderServiceStub(channel), auth_token)
 
     yield start
 

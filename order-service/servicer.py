@@ -1,6 +1,6 @@
 import logging
 from decimal import Decimal, InvalidOperation
-from typing import NoReturn
+from typing import NoReturn, Protocol
 
 import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
@@ -11,13 +11,33 @@ from clients.payment_client import PaymentClient
 from clients.product_client import ProductClient
 from database import SessionLocal
 from models import Order, OrderItem
-from generated import order_pb2, order_pb2_grpc
+from generated import order_pb2, order_pb2_grpc, payment_pb2, product_pb2
+from security import authenticated_user_id
+from security_config import JwtVerifier
 
 
 logger = logging.getLogger(__name__)
 _MAX_INT32 = 2147483647
 _MAX_AMOUNT = Decimal("9999999999.99")
 _MAX_PRICE = Decimal("9999999999.99")
+
+
+class ProductClientProtocol(Protocol):
+    def get_product(self, product_id: int, /) -> product_pb2.Product: ...
+
+    def check_stock(
+        self, product_id: int, /
+    ) -> product_pb2.CheckStockResponse: ...
+
+    def update_stock(self, product_id: int, quantity_delta: int, /) -> int: ...
+
+    def close(self) -> None: ...
+
+
+class PaymentClientProtocol(Protocol):
+    def process_payment(self, order_id: int, amount: str) -> payment_pb2.Payment: ...
+
+    def close(self) -> None: ...
 
 
 def _price_from_product(price_text: str) -> Decimal:
@@ -92,15 +112,29 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
         self,
         product_address: str | None = None,
         payment_address: str | None = None,
+        *,
+        token_verifier: JwtVerifier | None = None,
+        product_client: ProductClientProtocol | None = None,
+        payment_client: PaymentClientProtocol | None = None,
     ):
-        self.product_client = ProductClient(product_address)
-        self.payment_client = PaymentClient(payment_address)
+        self.token_verifier = (
+            token_verifier
+            if token_verifier is not None
+            else JwtVerifier.from_environment()
+        )
+        self.product_client = (
+            product_client if product_client is not None else ProductClient(product_address)
+        )
+        self.payment_client = (
+            payment_client if payment_client is not None else PaymentClient(payment_address)
+        )
 
     def close(self) -> None:
         self.product_client.close()
         self.payment_client.close()
 
     def CreateOrder(self, request, context):
+        user_id = authenticated_user_id(context, self.token_verifier)
         if not request.items:
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
@@ -179,7 +213,11 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
         order_id: int | None = None
         try:
             with SessionLocal.begin() as session:
-                order = Order(total_amount=total_amount, status="PENDING")
+                order = Order(
+                    total_amount=total_amount,
+                    status="PENDING",
+                    user_id=user_id,
+                )
                 session.add(order)
                 session.flush()
                 items = [
@@ -249,7 +287,7 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
             self._set_order_payment(
                 order_id, "PAYMENT_FAILED", payment.id, payment.status, context
             )
-            return self._get_order_response(order_id, context)
+            return self._get_order_response(order_id, user_id, context)
 
         self._set_order_payment(order_id, "PAID", payment.id, payment.status, context)
         for product_id, quantity in required_stock.items():
@@ -268,12 +306,13 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
                     order_id=order_id,
                 )
 
-        return self._get_order_response(order_id, context)
+        return self._get_order_response(order_id, user_id, context)
 
     def GetOrder(self, request, context):
+        user_id = authenticated_user_id(context, self.token_verifier)
         if request.order_id <= 0:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Order ID must be positive.")
-        return self._get_order_response(request.order_id, context)
+        return self._get_order_response(request.order_id, user_id, context)
 
     @staticmethod
     def _set_order_status(order_id: int, status: str, context) -> None:
@@ -325,11 +364,16 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
             )
 
     @staticmethod
-    def _get_order_response(order_id: int, context):
+    def _get_order_response(order_id: int, user_id: int, context):
         response = None
         try:
             with SessionLocal.begin() as session:
-                order = session.get(Order, order_id)
+                order = session.scalar(
+                    select(Order).where(
+                        Order.id == order_id,
+                        Order.user_id == user_id,
+                    )
+                )
                 if order is None:
                     response = None
                 else:

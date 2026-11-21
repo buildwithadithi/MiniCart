@@ -2,6 +2,7 @@ import os
 import sys
 from concurrent import futures
 from pathlib import Path
+from uuid import uuid4
 
 import grpc
 import pytest
@@ -16,6 +17,7 @@ sys.path.insert(0, str(ORDER_SERVICE_ROOT))
 
 from database import SessionLocal, engine
 from models import Order, OrderItem
+from generated import auth_pb2, auth_pb2_grpc
 from generated import order_pb2_grpc, payment_pb2_grpc, product_pb2_grpc
 from servicer import OrderServiceServicer
 
@@ -25,6 +27,10 @@ def _service_addresses() -> tuple[tuple[str, str], ...]:
         ("Product Service", os.getenv("PRODUCT_SERVICE_ADDRESS", "127.0.0.1:50051")),
         ("Order Service", os.getenv("ORDER_SERVICE_ADDRESS", "127.0.0.1:50052")),
         ("Payment Service", os.getenv("PAYMENT_SERVICE_ADDRESS", "127.0.0.1:50053")),
+        (
+            "Authentication Service",
+            os.getenv("AUTH_SERVICE_ADDRESS", "127.0.0.1:50054"),
+        ),
     )
 
 
@@ -64,9 +70,74 @@ def product_stub():
 
 
 @pytest.fixture(scope="session")
-def order_stub():
+def auth_token():
+    address = os.getenv("AUTH_SERVICE_ADDRESS", "127.0.0.1:50054")
+    channel = grpc.insecure_channel(address)
+    stub = auth_pb2_grpc.AuthServiceStub(channel)
+    email = f"e2e-tests-{uuid4().hex}@example.com"
+    password = "e2e-tests-password-7431"
+    registration = None
+    try:
+        registration = stub.Register(
+            auth_pb2.RegisterRequest(
+                name="MiniCart E2E Test User",
+                email=email,
+                password=password,
+            ),
+            timeout=5,
+        )
+        token = stub.Login(
+            auth_pb2.LoginRequest(email=email, password=password),
+            timeout=5,
+        ).access_token
+        yield token
+    finally:
+        channel.close()
+        if registration is not None:
+            with SessionLocal.begin() as session:
+                order_ids = list(
+                    session.execute(
+                        text("SELECT id FROM orders WHERE user_id = :user_id"),
+                        {"user_id": registration.user_id},
+                    ).scalars()
+                )
+                if order_ids:
+                    session.execute(
+                        text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
+                        {"order_ids": order_ids},
+                    )
+                    session.execute(
+                        text("DELETE FROM order_items WHERE order_id = ANY(:order_ids)"),
+                        {"order_ids": order_ids},
+                    )
+                    session.execute(
+                        text("DELETE FROM orders WHERE id = ANY(:order_ids)"),
+                        {"order_ids": order_ids},
+                    )
+                session.execute(
+                    text("DELETE FROM users WHERE id = :user_id"),
+                    {"user_id": registration.user_id},
+                )
+
+
+class AuthenticatedOrderStub:
+    def __init__(self, stub, token):
+        self._stub = stub
+        self._metadata = (("authorization", f"Bearer {token}"),)
+
+    def CreateOrder(self, request, **kwargs):
+        kwargs["metadata"] = self._metadata
+        return self._stub.CreateOrder(request, **kwargs)
+
+    def GetOrder(self, request, **kwargs):
+        kwargs["metadata"] = self._metadata
+        return self._stub.GetOrder(request, **kwargs)
+
+
+@pytest.fixture(scope="session")
+def order_stub(auth_token):
     channel = grpc.insecure_channel(_service_addresses()[1][1])
-    yield order_pb2_grpc.OrderServiceStub(channel)
+    yield AuthenticatedOrderStub(order_pb2_grpc.OrderServiceStub(channel), auth_token)
     channel.close()
 
 
@@ -108,7 +179,7 @@ def created_records():
 
 
 @pytest.fixture
-def isolated_order_stub():
+def isolated_order_stub(auth_token):
     instances = []
 
     def start(product_address=None, payment_address=None):
@@ -134,7 +205,7 @@ def isolated_order_stub():
             raise RuntimeError("Isolated E2E Order Service did not become ready.")
 
         instances.append((server, channel, servicer))
-        return order_pb2_grpc.OrderServiceStub(channel)
+        return AuthenticatedOrderStub(order_pb2_grpc.OrderServiceStub(channel), auth_token)
 
     yield start
 
