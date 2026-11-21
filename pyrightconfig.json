@@ -1,6 +1,7 @@
 {
   "extraPaths": [
     "order-service",
+    "product-service",
     "api-gateway"
   ]
 }
