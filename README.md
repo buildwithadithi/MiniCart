@@ -1,6 +1,6 @@
 # MiniCart
 
-MiniCart is the initial project setup for a Python microservices e-commerce application. It establishes service-owned SQLAlchemy models, shared PostgreSQL development infrastructure, and Protocol Buffer contracts without implementing service or API business logic.
+MiniCart is a Python microservices e-commerce application with service-owned SQLAlchemy models, shared PostgreSQL development infrastructure, Protocol Buffer contracts, and a FastAPI API Gateway.
 
 ## Technology stack
 
@@ -16,7 +16,9 @@ Install the complete development dependencies with `python -m pip install -r req
 
 ```text
 minicart/
-├── api-gateway/            # Gateway dependencies (no endpoints yet)
+├── api-gateway/            # FastAPI REST-to-gRPC API Gateway
+│   ├── gateway/             # Gateway app, request/response schemas, Order gRPC client
+│   └── tests/               # Isolated API Gateway tests
 ├── product-service/        # Product/inventory models and DB access
 │   ├── server.py           # Product Service gRPC server
 │   ├── servicer.py         # Product RPC handlers
@@ -42,6 +44,44 @@ minicart/
 ```
 
 Each service defines its own SQLAlchemy `Base` and owns its tables. The order and payment services intentionally do not declare foreign keys to tables owned by other services. The product inventory table references the product table within its own service.
+
+## FastAPI API Gateway
+
+The API Gateway exposes REST endpoints and forwards order operations to the Order Service over gRPC. It does not connect to PostgreSQL or duplicate order workflow logic.
+
+Start PostgreSQL and all three services in separate terminals from the project root:
+
+```powershell
+docker compose up -d postgres
+python product-service/server.py
+python order-service/server.py
+python payment-service/server.py
+```
+
+In another terminal, install the Gateway dependencies and start it:
+
+```powershell
+python -m pip install -r api-gateway/requirements.txt
+python -m uvicorn gateway.main:app --app-dir api-gateway --host 127.0.0.1 --port 8000
+```
+
+The Order Service target defaults to `localhost:50052`. Configure `ORDER_SERVICE_ADDRESS` to override it, or use `ORDER_SERVICE_HOST` and `ORDER_SERVICE_PORT`; `ORDER_SERVICE_TIMEOUT_SECONDS` configures the gRPC deadline.
+
+REST endpoints:
+
+- `GET /health` checks only that the Gateway is responding.
+- `POST /orders` accepts `{"items":[{"product_id":1,"quantity":2}]}` and returns the Order Service result.
+- `GET /orders/{order_id}` retrieves an order through the Order Service.
+
+Open Swagger UI at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs). The OpenAPI schema is at [http://127.0.0.1:8000/openapi.json](http://127.0.0.1:8000/openapi.json).
+
+Run the Gateway tests from the project root:
+
+```powershell
+python -m pytest api-gateway/tests/ -v
+```
+
+These tests use a fake Order Service client to verify request/response conversion, REST validation, HTTP error mapping, and Swagger/OpenAPI availability without requiring running microservices.
 
 ## Product Service
 
