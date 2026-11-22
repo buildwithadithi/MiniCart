@@ -1,3 +1,0 @@
-ALTER TABLE orders
-    ADD COLUMN IF NOT EXISTS payment_id INTEGER,
-    ADD COLUMN IF NOT EXISTS payment_status VARCHAR(32);

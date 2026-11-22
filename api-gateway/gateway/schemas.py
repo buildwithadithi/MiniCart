@@ -33,8 +33,6 @@ class OrderResponse(BaseModel):
     status: str
     created_at: datetime
     items: list[OrderItemResponse]
-    payment_id: int
-    payment_status: str
 
 
 class HealthResponse(BaseModel):

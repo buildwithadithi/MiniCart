@@ -41,14 +41,6 @@ def _service_addresses() -> tuple[tuple[str, str], ...]:
             ),
         ),
         (
-            "Payment Service",
-            os.getenv(
-                "PAYMENT_SERVICE_ADDRESS",
-                f"{os.getenv('PAYMENT_SERVICE_HOST', '127.0.0.1')}:"
-                f"{os.getenv('PAYMENT_SERVICE_PORT', '50053')}",
-            ),
-        ),
-        (
             "Authentication Service",
             os.getenv(
                 "AUTH_SERVICE_ADDRESS",
@@ -98,7 +90,6 @@ def require_running_stack(database_components):
             "auth": ("users",),
             "product": ("products", "inventory"),
             "order": ("orders", "order_items"),
-            "payment": ("payments",),
         }.items():
             engine = database_components[service_name]["engine"]
             with engine.connect() as connection:
@@ -139,16 +130,6 @@ def product_stub():
     from generated import product_pb2_grpc
 
     yield product_pb2_grpc.ProductServiceStub(channel)
-    channel.close()
-
-
-@pytest.fixture(scope="session")
-def payment_stub():
-    address = _service_addresses()[2][1]
-    channel = grpc.insecure_channel(address)
-    from generated import payment_pb2_grpc
-
-    yield payment_pb2_grpc.PaymentServiceStub(channel)
     channel.close()
 
 
@@ -228,22 +209,11 @@ def product_unavailable_gateway(gateway_client):
 
 
 @pytest.fixture
-def payment_unavailable_gateway(gateway_client):
-    client = _optional_outage_gateway(
-        "MINICART_PAYMENT_UNAVAILABLE_GATEWAY_URL",
-        gateway_client.headers["Authorization"],
-    )
-    yield client
-    client.close()
-
-
-@pytest.fixture
 def created_records(database_components):
     records = {"order_ids": set(), "product_ids": set(), "user_ids": set()}
     yield records
 
     order_sessions = database_components["order"]["sessions"]
-    payment_sessions = database_components["payment"]["sessions"]
     product_sessions = database_components["product"]["sessions"]
     auth_sessions = database_components["auth"]["sessions"]
     product_ids = list(records["product_ids"])
@@ -261,11 +231,6 @@ def created_records(database_components):
 
     if order_ids:
         order_id_list = list(order_ids)
-        with payment_sessions.begin() as session:
-            session.execute(
-                text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
-                {"order_ids": order_id_list},
-            )
         with order_sessions.begin() as session:
             session.execute(
                 text("DELETE FROM order_items WHERE order_id = ANY(:order_ids)"),

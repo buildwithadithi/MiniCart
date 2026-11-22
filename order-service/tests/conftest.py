@@ -13,15 +13,16 @@ from sqlalchemy.exc import SQLAlchemyError
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SERVICE_ROOT = PROJECT_ROOT / "order-service"
 TESTS_ROOT = PROJECT_ROOT / "tests"
-for path in (str(PROJECT_ROOT), str(SERVICE_ROOT), str(TESTS_ROOT)):
-    if path not in sys.path:
-        sys.path.insert(0, path)
+for path in (str(TESTS_ROOT), str(PROJECT_ROOT), str(SERVICE_ROOT)):
+    if path in sys.path:
+        sys.path.remove(path)
+    sys.path.insert(0, path)
 
 from database import engine
 from database_connections import create_service_database_connections
 from models import Order, OrderItem
 from generated import auth_pb2, auth_pb2_grpc
-from generated import order_pb2_grpc, payment_pb2_grpc, product_pb2_grpc
+from generated import order_pb2_grpc, product_pb2_grpc
 from servicer import OrderServiceServicer
 
 
@@ -45,7 +46,6 @@ def require_running_services_and_database():
     addresses = (
         ("Order Service", os.getenv("ORDER_SERVICE_ADDRESS", "127.0.0.1:50052")),
         ("Product Service", os.getenv("PRODUCT_SERVICE_ADDRESS", "127.0.0.1:50051")),
-        ("Payment Service", os.getenv("PAYMENT_SERVICE_ADDRESS", "127.0.0.1:50053")),
         ("Authentication Service", os.getenv("AUTH_SERVICE_ADDRESS", "127.0.0.1:50054")),
     )
     for service_name, address in addresses:
@@ -117,12 +117,6 @@ def auth_token(require_running_services_and_database, service_databases):
                         text("DELETE FROM orders WHERE id = ANY(:order_ids)"),
                         {"order_ids": order_ids},
                     )
-            if order_ids:
-                with service_databases["payment"]["sessions"].begin() as session:
-                    session.execute(
-                        text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
-                        {"order_ids": order_ids},
-                    )
             with service_databases["auth"]["sessions"].begin() as session:
                 session.execute(
                     text("DELETE FROM users WHERE id = :user_id"),
@@ -162,15 +156,6 @@ def product_stub(require_running_services_and_database):
     channel.close()
 
 
-@pytest.fixture(scope="session")
-def payment_stub(require_running_services_and_database):
-    assert require_running_services_and_database is None
-    address = os.getenv("PAYMENT_SERVICE_ADDRESS", "127.0.0.1:50053")
-    channel = grpc.insecure_channel(address)
-    yield payment_pb2_grpc.PaymentServiceStub(channel)
-    channel.close()
-
-
 @pytest.fixture
 def test_records(service_databases):
     records = {"order_ids": [], "product_ids": []}
@@ -189,11 +174,6 @@ def test_records(service_databases):
             session.query(Order).filter(Order.id.in_(order_ids)).delete(
                 synchronize_session=False
             )
-        with service_databases["payment"]["sessions"].begin() as session:
-            session.execute(
-                text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
-                {"order_ids": order_ids},
-            )
     if product_ids:
         with service_databases["product"]["sessions"].begin() as session:
             session.execute(
@@ -211,10 +191,9 @@ def start_isolated_order_service(require_running_services_and_database, auth_tok
     assert require_running_services_and_database is None
     servers = []
 
-    def start(product_address=None, payment_address=None):
+    def start(product_address=None):
         servicer = OrderServiceServicer(
             product_address=product_address,
-            payment_address=payment_address,
         )
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
         order_pb2_grpc.add_OrderServiceServicer_to_server(servicer, server)

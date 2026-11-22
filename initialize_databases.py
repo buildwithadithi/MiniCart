@@ -27,13 +27,6 @@ SCHEMA_INITIALIZERS = (
         "database",
         ("orders", "order_items"),
     ),
-    (
-        "Payment Service",
-        PROJECT_ROOT / "payment-service",
-        "models",
-        "database",
-        ("payments",),
-    ),
 )
 
 

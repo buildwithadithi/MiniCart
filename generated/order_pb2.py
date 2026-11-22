@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0border.proto\x12\x11minicart.order.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"J\n\x0eOrderItemInput\x12\x12\n\nproduct_id\x18\x01 \x01(\x03\x12\x10\n\x08quantity\x18\x02 \x01(\x05\x12\x12\n\nunit_price\x18\x03 \x01(\t\"Q\n\tOrderItem\x12\n\n\x02id\x18\x01 \x01(\x03\x12\x12\n\nproduct_id\x18\x02 \x01(\x03\x12\x10\n\x08quantity\x18\x03 \x01(\x05\x12\x12\n\nunit_price\x18\x04 \x01(\t\"\xc2\x01\n\x05Order\x12\n\n\x02id\x18\x01 \x01(\x03\x12\x14\n\x0ctotal_amount\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\x12.\n\ncreated_at\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12+\n\x05items\x18\x05 \x03(\x0b\x32\x1c.minicart.order.v1.OrderItem\x12\x12\n\npayment_id\x18\x06 \x01(\x03\x12\x16\n\x0epayment_status\x18\x07 \x01(\t\"F\n\x12\x43reateOrderRequest\x12\x30\n\x05items\x18\x01 \x03(\x0b\x32!.minicart.order.v1.OrderItemInput\">\n\x13\x43reateOrderResponse\x12\'\n\x05order\x18\x01 \x01(\x0b\x32\x18.minicart.order.v1.Order\"#\n\x0fGetOrderRequest\x12\x10\n\x08order_id\x18\x01 \x01(\x03\";\n\x10GetOrderResponse\x12\'\n\x05order\x18\x01 \x01(\x0b\x32\x18.minicart.order.v1.Order2\xc1\x01\n\x0cOrderService\x12\\\n\x0b\x43reateOrder\x12%.minicart.order.v1.CreateOrderRequest\x1a&.minicart.order.v1.CreateOrderResponse\x12S\n\x08GetOrder\x12\".minicart.order.v1.GetOrderRequest\x1a#.minicart.order.v1.GetOrderResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0border.proto\x12\x11minicart.order.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"J\n\x0eOrderItemInput\x12\x12\n\nproduct_id\x18\x01 \x01(\x03\x12\x10\n\x08quantity\x18\x02 \x01(\x05\x12\x12\n\nunit_price\x18\x03 \x01(\t\"Q\n\tOrderItem\x12\n\n\x02id\x18\x01 \x01(\x03\x12\x12\n\nproduct_id\x18\x02 \x01(\x03\x12\x10\n\x08quantity\x18\x03 \x01(\x05\x12\x12\n\nunit_price\x18\x04 \x01(\t\"\xa2\x01\n\x05Order\x12\n\n\x02id\x18\x01 \x01(\x03\x12\x14\n\x0ctotal_amount\x18\x02 \x01(\t\x12\x0e\n\x06status\x18\x03 \x01(\t\x12.\n\ncreated_at\x18\x04 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12+\n\x05items\x18\x05 \x03(\x0b\x32\x1c.minicart.order.v1.OrderItemJ\x04\x08\x06\x10\x07J\x04\x08\x07\x10\x08\"F\n\x12\x43reateOrderRequest\x12\x30\n\x05items\x18\x01 \x03(\x0b\x32!.minicart.order.v1.OrderItemInput\">\n\x13\x43reateOrderResponse\x12\'\n\x05order\x18\x01 \x01(\x0b\x32\x18.minicart.order.v1.Order\"#\n\x0fGetOrderRequest\x12\x10\n\x08order_id\x18\x01 \x01(\x03\";\n\x10GetOrderResponse\x12\'\n\x05order\x18\x01 \x01(\x0b\x32\x18.minicart.order.v1.Order2\xc1\x01\n\x0cOrderService\x12\\\n\x0b\x43reateOrder\x12%.minicart.order.v1.CreateOrderRequest\x1a&.minicart.order.v1.CreateOrderResponse\x12S\n\x08GetOrder\x12\".minicart.order.v1.GetOrderRequest\x1a#.minicart.order.v1.GetOrderResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -37,15 +37,15 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_ORDERITEM']._serialized_start=143
   _globals['_ORDERITEM']._serialized_end=224
   _globals['_ORDER']._serialized_start=227
-  _globals['_ORDER']._serialized_end=421
-  _globals['_CREATEORDERREQUEST']._serialized_start=423
-  _globals['_CREATEORDERREQUEST']._serialized_end=493
-  _globals['_CREATEORDERRESPONSE']._serialized_start=495
-  _globals['_CREATEORDERRESPONSE']._serialized_end=557
-  _globals['_GETORDERREQUEST']._serialized_start=559
-  _globals['_GETORDERREQUEST']._serialized_end=594
-  _globals['_GETORDERRESPONSE']._serialized_start=596
-  _globals['_GETORDERRESPONSE']._serialized_end=655
-  _globals['_ORDERSERVICE']._serialized_start=658
-  _globals['_ORDERSERVICE']._serialized_end=851
+  _globals['_ORDER']._serialized_end=389
+  _globals['_CREATEORDERREQUEST']._serialized_start=391
+  _globals['_CREATEORDERREQUEST']._serialized_end=461
+  _globals['_CREATEORDERRESPONSE']._serialized_start=463
+  _globals['_CREATEORDERRESPONSE']._serialized_end=525
+  _globals['_GETORDERREQUEST']._serialized_start=527
+  _globals['_GETORDERREQUEST']._serialized_end=562
+  _globals['_GETORDERRESPONSE']._serialized_start=564
+  _globals['_GETORDERRESPONSE']._serialized_end=623
+  _globals['_ORDERSERVICE']._serialized_start=626
+  _globals['_ORDERSERVICE']._serialized_end=819
 # @@protoc_insertion_point(module_scope)

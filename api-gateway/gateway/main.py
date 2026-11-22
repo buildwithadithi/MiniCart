@@ -204,8 +204,6 @@ def _order_response(order: order_pb2.Order) -> OrderResponse:
             )
             for item in order.items
         ],
-        payment_id=order.payment_id,
-        payment_status=order.payment_status,
     )
 
 
@@ -308,7 +306,7 @@ def create_app(
         summary="Create an order",
         description=(
             "Creates an order through the Order Service. Product prices and "
-            "payment processing are handled by downstream services."
+            "inventory are handled by downstream services."
         ),
         responses={
             400: {"description": "Invalid request rejected by the Order Service."},

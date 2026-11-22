@@ -5,13 +5,13 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import servicer as order_servicer_module
 from database import Base
-from generated import order_pb2, payment_pb2, product_pb2
+from generated import order_pb2, product_pb2
 from models import Order
 from security_config import JwtVerifier
 from servicer import OrderServiceServicer
@@ -55,17 +55,12 @@ class FakeProductClient:
         pass
 
 
-class FakePaymentClient:
-    def process_payment(self, order_id, amount):
-        return payment_pb2.Payment(
-            id=88,
-            order_id=order_id,
-            amount=amount,
-            status="SUCCESS",
-        )
+class StockUpdateUnavailable(grpc.RpcError):
+    def code(self):
+        return grpc.StatusCode.UNAVAILABLE
 
-    def close(self):
-        pass
+    def details(self):
+        return "Product Service is unavailable."
 
 
 @pytest.fixture
@@ -107,7 +102,6 @@ def order_test_environment(monkeypatch):
     servicer = OrderServiceServicer(
         token_verifier=verifier,
         product_client=FakeProductClient(),
-        payment_client=FakePaymentClient(),
     )
     yield session_factory, servicer, token_for
     servicer.close()
@@ -132,9 +126,47 @@ def test_create_order_uses_verified_subject_not_identity_metadata(
 
     with session_factory() as session:
         persisted = session.get(Order, response.order.id)
-    assert response.order.status == "PAID"
+    assert response.order.status == "CONFIRMED"
     assert persisted is not None
     assert persisted.user_id == 101
+
+
+def test_inventory_failure_restores_prior_updates_and_fails_order(
+    order_test_environment,
+):
+    session_factory, servicer, token_for = order_test_environment
+
+    class FailingProductClient(FakeProductClient):
+        def __init__(self):
+            self.stock = {7: 5, 8: 5}
+            self.updates = []
+
+        def update_stock(self, product_id: int, quantity_delta: int, /):
+            self.updates.append((product_id, quantity_delta))
+            if product_id == 8 and quantity_delta < 0:
+                raise StockUpdateUnavailable()
+            self.stock[product_id] += quantity_delta
+            return self.stock[product_id]
+
+    product_client = FailingProductClient()
+    servicer.product_client = product_client
+    request = order_pb2.CreateOrderRequest(
+        items=[
+            order_pb2.OrderItemInput(product_id=7, quantity=1),
+            order_pb2.OrderItemInput(product_id=8, quantity=1),
+        ]
+    )
+
+    with pytest.raises(RpcAbort) as error:
+        servicer.CreateOrder(request, FakeContext(_metadata(token_for(101))))
+
+    assert error.value.code == grpc.StatusCode.UNAVAILABLE
+    assert product_client.updates == [(7, -1), (8, -1), (7, 1)]
+    assert product_client.stock == {7: 5, 8: 5}
+    with session_factory() as session:
+        persisted = session.scalar(select(Order))
+    assert persisted is not None
+    assert persisted.status == "FAILED"
 
 
 def test_order_owner_can_retrieve_order(order_test_environment):

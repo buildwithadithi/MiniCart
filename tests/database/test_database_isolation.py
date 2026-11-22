@@ -30,19 +30,11 @@ SERVICE_DATABASES = (
         ("orders", "order_items"),
         id="order",
     ),
-    pytest.param(
-        "payment-service",
-        "database",
-        "minicart_payment_db",
-        ("payments",),
-        id="payment",
-    ),
 )
 ALL_SERVICE_DATABASES = {
     "minicart_auth_db",
     "minicart_product_db",
     "minicart_order_db",
-    "minicart_payment_db",
 }
 
 
@@ -112,7 +104,6 @@ def test_service_uses_only_its_own_postgresql_database(
             "inventory",
             "orders",
             "order_items",
-            "payments",
         }
         - set(expected_tables)
     )

@@ -32,22 +32,18 @@ class OrderItem(_message.Message):
     def __init__(self, id: _Optional[int] = ..., product_id: _Optional[int] = ..., quantity: _Optional[int] = ..., unit_price: _Optional[str] = ...) -> None: ...
 
 class Order(_message.Message):
-    __slots__ = ("id", "total_amount", "status", "created_at", "items", "payment_id", "payment_status")
+    __slots__ = ("id", "total_amount", "status", "created_at", "items")
     ID_FIELD_NUMBER: _ClassVar[int]
     TOTAL_AMOUNT_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
     CREATED_AT_FIELD_NUMBER: _ClassVar[int]
     ITEMS_FIELD_NUMBER: _ClassVar[int]
-    PAYMENT_ID_FIELD_NUMBER: _ClassVar[int]
-    PAYMENT_STATUS_FIELD_NUMBER: _ClassVar[int]
     id: int
     total_amount: str
     status: str
     created_at: _timestamp_pb2.Timestamp
     items: _containers.RepeatedCompositeFieldContainer[OrderItem]
-    payment_id: int
-    payment_status: str
-    def __init__(self, id: _Optional[int] = ..., total_amount: _Optional[str] = ..., status: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., items: _Optional[_Iterable[_Union[OrderItem, _Mapping]]] = ..., payment_id: _Optional[int] = ..., payment_status: _Optional[str] = ...) -> None: ...
+    def __init__(self, id: _Optional[int] = ..., total_amount: _Optional[str] = ..., status: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., items: _Optional[_Iterable[_Union[OrderItem, _Mapping]]] = ...) -> None: ...
 
 class CreateOrderRequest(_message.Message):
     __slots__ = ("items",)

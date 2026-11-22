@@ -13,7 +13,6 @@ SERVICE_DATABASES = {
     "auth": ("AUTH_DB_NAME", "minicart_auth_db"),
     "product": ("PRODUCT_DB_NAME", "minicart_product_db"),
     "order": ("ORDER_DB_NAME", "minicart_order_db"),
-    "payment": ("PAYMENT_DB_NAME", "minicart_payment_db"),
 }
 
 

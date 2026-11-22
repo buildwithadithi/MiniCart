@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import text
 
-from generated import payment_pb2, product_pb2
+from generated import product_pb2
 
 
 def _add_product(product_stub, created_records, *, price="19.95", stock=10):
@@ -29,27 +29,9 @@ def _create_order(gateway_client, product_id: int, quantity: int):
     )
 
 
-def _prepare_next_order_parity(
-    gateway_client, product_stub, created_records, desired_parity: int
-) -> None:
-    product = _add_product(product_stub, created_records, price="1.00", stock=10)
-    preceding_parity = 1 - desired_parity
-    for _ in range(2):
-        response = _create_order(gateway_client, product.id, quantity=1)
-        assert response.status_code == 201, response.text
-        order_id = response.json()["id"]
-        created_records["order_ids"].add(order_id)
-        if order_id % 2 == preceding_parity:
-            return
-    pytest.fail("Could not arrange the next order ID parity for payment testing.")
-
-
-def test_successful_order_and_payment_through_gateway(
-    gateway_client, product_stub, payment_stub, created_records, database_components
+def test_successful_order_through_gateway(
+    gateway_client, product_stub, created_records, database_components
 ):
-    _prepare_next_order_parity(
-        gateway_client, product_stub, created_records, desired_parity=0
-    )
     product = _add_product(product_stub, created_records)
     retrieved_product = product_stub.GetProduct(
         product_pb2.GetProductRequest(product_id=product.id), timeout=5
@@ -68,11 +50,8 @@ def test_successful_order_and_payment_through_gateway(
     created_records["order_ids"].add(order["id"])
 
     expected_total = Decimal(retrieved_product.price) * 2
-    assert order["id"] % 2 == 0
     assert Decimal(order["total_amount"]) == expected_total
-    assert order["status"] == "PAID"
-    assert order["payment_status"] == "SUCCESS"
-    assert order["payment_id"] > 0
+    assert order["status"] == "CONFIRMED"
     assert order["items"] == [
         {
             "id": order["items"][0]["id"],
@@ -81,15 +60,6 @@ def test_successful_order_and_payment_through_gateway(
             "unit_price": "19.95",
         }
     ]
-
-    payment = payment_stub.GetPaymentStatus(
-        payment_pb2.GetPaymentStatusRequest(payment_id=order["payment_id"]),
-        timeout=5,
-    ).payment
-    assert payment.id == order["payment_id"]
-    assert payment.order_id == order["id"]
-    assert Decimal(payment.amount) == expected_total
-    assert payment.status == order["payment_status"]
 
     remaining_stock = product_stub.CheckStock(
         product_pb2.CheckStockRequest(product_id=product.id), timeout=5
@@ -108,8 +78,7 @@ def test_successful_order_and_payment_through_gateway(
     with database_components["order"]["sessions"]() as session:
         order_row = session.execute(
             text(
-                "SELECT total_amount, status, payment_id, payment_status "
-                "FROM orders WHERE id = :order_id"
+                "SELECT total_amount, status FROM orders WHERE id = :order_id"
             ),
             {"order_id": order["id"]},
         ).one()
@@ -120,86 +89,16 @@ def test_successful_order_and_payment_through_gateway(
             ),
             {"order_id": order["id"]},
         ).all()
-    with database_components["payment"]["sessions"]() as session:
-        payment_row = session.execute(
-            text(
-                "SELECT id, order_id, amount, status FROM payments WHERE id = :id"
-            ),
-            {"id": order["payment_id"]},
-        ).one()
 
     assert product_row.name == product.name
     assert product_row.price == expected_total / 2
     assert product_row.available_stock == 8
     assert order_row.total_amount == expected_total
-    assert order_row.status == "PAID"
-    assert order_row.payment_id == payment_row.id == order["payment_id"]
-    assert order_row.payment_status == payment_row.status == "SUCCESS"
+    assert order_row.status == "CONFIRMED"
     assert len(item_rows) == 1
     assert item_rows[0].product_id == product.id
     assert item_rows[0].quantity == 2
     assert item_rows[0].unit_price == Decimal("19.95")
-    assert payment_row.order_id == order["id"]
-    assert payment_row.amount == order_row.total_amount
-
-
-def test_failed_payment_keeps_inventory_unchanged(
-    gateway_client, product_stub, payment_stub, created_records, database_components
-):
-    _prepare_next_order_parity(
-        gateway_client, product_stub, created_records, desired_parity=1
-    )
-    product = _add_product(product_stub, created_records, price="8.75", stock=10)
-    initial_stock = product_stub.CheckStock(
-        product_pb2.CheckStockRequest(product_id=product.id), timeout=5
-    )
-    assert initial_stock.available_stock == 10
-
-    response = _create_order(gateway_client, product.id, quantity=2)
-    assert response.status_code == 201, response.text
-    order = response.json()
-    created_records["order_ids"].add(order["id"])
-
-    assert order["id"] % 2 == 1
-    assert Decimal(order["total_amount"]) == Decimal("17.50")
-    assert order["status"] == "PAYMENT_FAILED"
-    assert order["payment_status"] == "FAILED"
-    assert order["payment_id"] > 0
-
-    payment = payment_stub.GetPaymentStatus(
-        payment_pb2.GetPaymentStatusRequest(payment_id=order["payment_id"]),
-        timeout=5,
-    ).payment
-    stock_after = product_stub.CheckStock(
-        product_pb2.CheckStockRequest(product_id=product.id), timeout=5
-    )
-    assert payment.id == order["payment_id"]
-    assert payment.order_id == order["id"]
-    assert payment.status == "FAILED"
-    assert Decimal(payment.amount) == Decimal("17.50")
-    assert stock_after.available_stock == initial_stock.available_stock == 10
-
-    with database_components["order"]["sessions"]() as session:
-        order_row = session.execute(
-            text(
-                "SELECT status, payment_id, payment_status FROM orders "
-                "WHERE id = :order_id"
-            ),
-            {"order_id": order["id"]},
-        ).one()
-    with database_components["payment"]["sessions"]() as session:
-        payment_row = session.execute(
-            text(
-                "SELECT id, order_id, amount, status FROM payments "
-                "WHERE order_id = :order_id"
-            ),
-            {"order_id": order["id"]},
-        ).one()
-
-    assert order_row.status == "PAYMENT_FAILED"
-    assert order_row.payment_id == payment_row.id == order["payment_id"]
-    assert order_row.payment_status == payment_row.status == "FAILED"
-    assert payment_row.amount == Decimal("17.50")
 
 
 def test_nonexistent_product_returns_not_found(gateway_client):
@@ -243,8 +142,6 @@ def test_retrieve_existing_order_through_gateway(
     assert retrieved_order["id"] == created_order["id"]
     assert retrieved_order["total_amount"] == created_order["total_amount"]
     assert retrieved_order["status"] == created_order["status"]
-    assert retrieved_order["payment_id"] == created_order["payment_id"]
-    assert retrieved_order["payment_status"] == created_order["payment_status"]
     assert retrieved_order["items"] == created_order["items"]
 
 
@@ -263,46 +160,3 @@ def test_product_service_unavailable_returns_service_unavailable(
     )
 
     assert response.status_code == 503
-
-
-def test_payment_service_unavailable_does_not_reduce_inventory(
-    payment_unavailable_gateway,
-    product_stub,
-    created_records,
-    database_components,
-):
-    product = _add_product(product_stub, created_records, price="5.25", stock=10)
-    initial_stock = product_stub.CheckStock(
-        product_pb2.CheckStockRequest(product_id=product.id), timeout=5
-    )
-
-    response = _create_order(
-        payment_unavailable_gateway, product.id, quantity=2
-    )
-
-    assert response.status_code == 503
-    stock_after = product_stub.CheckStock(
-        product_pb2.CheckStockRequest(product_id=product.id), timeout=5
-    )
-    assert stock_after.available_stock == initial_stock.available_stock == 10
-
-    with database_components["order"]["sessions"]() as session:
-        order_row = session.execute(
-            text(
-                "SELECT o.id, o.status, o.payment_id, o.payment_status "
-                "FROM orders AS o JOIN order_items AS i ON i.order_id = o.id "
-                "WHERE i.product_id = :product_id"
-            ),
-            {"product_id": product.id},
-        ).one()
-    with database_components["payment"]["sessions"]() as session:
-        payment_count = session.execute(
-            text("SELECT count(*) FROM payments WHERE order_id = :order_id"),
-            {"order_id": order_row.id},
-        ).scalar_one()
-
-    created_records["order_ids"].add(order_row.id)
-    assert order_row.status == "PAYMENT_FAILED"
-    assert order_row.payment_id is None
-    assert order_row.payment_status is None
-    assert payment_count == 0

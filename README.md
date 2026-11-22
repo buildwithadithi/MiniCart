@@ -1,6 +1,6 @@
 # MiniCart
 
-MiniCart is a Python microservices e-commerce application with service-owned SQLAlchemy models, one PostgreSQL container with separate Authentication, Product, Order, and Payment databases, Protocol Buffer contracts, and a FastAPI API Gateway.
+MiniCart is a Python microservices e-commerce application with service-owned SQLAlchemy models, one PostgreSQL container with separate Authentication, Product, and Order databases, Protocol Buffer contracts, and a FastAPI API Gateway.
 
 ## Technology stack
 
@@ -29,18 +29,14 @@ minicart/
 │   ├── servicer.py         # Product RPC handlers
 │   └── tests/              # Live gRPC/PostgreSQL integration tests
 ├── order-service/          # Order service, database access, and gRPC clients
-│   ├── clients/            # Product and Payment Service gRPC clients
+│   ├── clients/            # Product Service gRPC client
 │   ├── migrations/         # Additive Order schema migrations
 │   ├── server.py           # Order Service gRPC server
 │   ├── servicer.py         # Order RPC handlers and workflow
 │   └── tests/              # Live gRPC/PostgreSQL integration tests
-├── payment-service/        # Payment model and DB access
-│   ├── server.py           # Payment Service gRPC server
-│   ├── servicer.py         # Payment RPC handlers
-│   └── tests/              # Live gRPC/PostgreSQL integration tests
 ├── tests/
 │   └── e2e/                # Cross-service gRPC/PostgreSQL workflows
-├── protos/                 # Auth, Product, Order, and Payment RPC contracts
+├── protos/                 # Auth, Product, and Order RPC contracts
 ├── generated/              # Generated Python protobuf/gRPC package
 ├── docker-compose.yml      # Local PostgreSQL service and named volume
 ├── docker/postgres/        # First-run initialization for service databases
@@ -51,20 +47,19 @@ minicart/
 └── requirements.txt        # Complete development dependencies
 ```
 
-Each service defines its own SQLAlchemy `Base`, connects only to its own PostgreSQL database, and owns its tables. The order and payment services intentionally do not declare foreign keys to tables owned by other services. The product inventory table references the product table within its own service.
+Each service defines its own SQLAlchemy `Base`, connects only to its own PostgreSQL database, and owns its tables. The Order Service intentionally does not declare foreign keys to tables owned by other services. The Product Service inventory table references the product table within its own service.
 
 ## Environment and dependency management
 
 MiniCart uses Python 3.13 for local development. Create one virtual environment per independently developed service and one root environment for code generation and cross-service testing. Activate only the environment for the component you are working on. The root requirements are the combined development/test toolset; do not install them into each service environment.
 
-Create all six environments from the project root:
+Create the service and root environments from the project root:
 
 ```powershell
 py -3.13 -m venv .venv
 py -3.13 -m venv auth-service\.venv
 py -3.13 -m venv product-service\.venv
 py -3.13 -m venv order-service\.venv
-py -3.13 -m venv payment-service\.venv
 py -3.13 -m venv api-gateway\.venv
 ```
 
@@ -92,12 +87,6 @@ deactivate
 # Order Service
 .\order-service\.venv\Scripts\Activate.ps1
 python -m pip install -r order-service\requirements.txt
-python -m pip check
-deactivate
-
-# Payment Service
-.\payment-service\.venv\Scripts\Activate.ps1
-python -m pip install -r payment-service\requirements.txt
 python -m pip check
 deactivate
 
@@ -138,9 +127,9 @@ Set `JWT_PRIVATE_KEY_PATH` and `JWT_PUBLIC_KEY_PATH` in `.env` to those files. R
 
 ### Database migrations and ownership
 
-Authentication owns `minicart_auth_db` and its `users` table. Product owns `minicart_product_db` (`products`, `inventory`); Order owns `minicart_order_db` (`orders`, `order_items`); Payment owns `minicart_payment_db` (`payments`). Set `AUTH_DB_NAME`, `PRODUCT_DB_NAME`, `ORDER_DB_NAME`, and `PAYMENT_DB_NAME` to override these local database names. Each service ignores `DB_NAME` and uses only its own service-specific database setting.
+Authentication owns `minicart_auth_db` and its `users` table. Product owns `minicart_product_db` (`products`, `inventory`); Order owns `minicart_order_db` (`orders`, `order_items`). Set `AUTH_DB_NAME`, `PRODUCT_DB_NAME`, and `ORDER_DB_NAME` to override these local database names. Each service ignores `DB_NAME` and uses only its own service-specific database setting.
 
-The additive Authentication and Order migrations remain for existing deployments. For a fresh setup, `initialize_databases.py` uses each SQLAlchemy model set to create and verify its tables in its service-owned database. It is safe to rerun:
+The additive Authentication and Order ownership migrations remain for existing deployments. `order-service/migrations/0003_remove_legacy_order_columns.sql` removes obsolete columns from an existing Order database. Apply it manually after the ownership migration; database initialization does not reset or modify existing databases. For a fresh setup, `initialize_databases.py` uses each SQLAlchemy model set to create and verify its tables in its service-owned database. It is safe to rerun:
 
 ```powershell
 .\.venv\Scripts\python.exe initialize_databases.py
@@ -173,11 +162,6 @@ python product-service/server.py
 ```powershell
 .\order-service\.venv\Scripts\Activate.ps1
 python order-service/server.py
-```
-
-```powershell
-.\payment-service\.venv\Scripts\Activate.ps1
-python payment-service/server.py
 ```
 
 In another terminal, activate the Gateway environment and start it:
@@ -238,18 +222,18 @@ All order RPCs require a Bearer JWT in gRPC metadata. Order Service independentl
 
 The Order Service owns the nullable `orders.user_id` column; the additive migration preserves existing orders with no owner assigned and creates no cross-service foreign key.
 
-The Order Service implements `CreateOrder` and `GetOrder` from `protos/order.proto`. It obtains product prices and stock through Product Service, saves the order and item prices in its own database, and invokes Payment Service. Successful payment marks the order `PAID` and reduces stock; failed payment marks it `PAYMENT_FAILED` and leaves stock unchanged.
+The Order Service implements `CreateOrder` and `GetOrder` from `protos/order.proto`. It obtains authoritative product prices and availability from Product Service, stores the order and item prices in its own database, updates inventory, and marks the order `CONFIRMED`.
 
-The `unit_price` in the current `OrderItemInput` request is ignored: the Product Service price is authoritative. `Order` responses include the payment ID and Payment Service status (`SUCCESS` or `FAILED`) when a payment was processed. Older orders without payment details return the protobuf defaults.
+The `unit_price` in the current `OrderItemInput` request is ignored: the Product Service price is authoritative. Order responses contain no external service status fields.
 
-Existing databases need both additive Order migrations. Apply payment details and ownership from the project root:
+For an existing Order database, apply the ownership migration and then remove legacy order columns from the project root:
 
 ```powershell
-Get-Content order-service/migrations/0001_add_payment_details.sql | docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 Get-Content order-service/migrations/0002_add_user_id.sql | docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+Get-Content order-service/migrations/0003_remove_legacy_order_columns.sql | docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
-The `user_id` migration adds a nullable column and index only; existing orders are preserved with no owner assigned and there is no cross-service foreign key.
+The ownership migration adds a nullable column and index; existing orders are preserved with no owner assigned and there is no cross-service foreign key. The legacy-column cleanup is idempotent and only affects the Order database.
 
 Start PostgreSQL from the project root:
 
@@ -269,142 +253,84 @@ python product-service/server.py
 python order-service/server.py
 ```
 
-```powershell
-.\payment-service\.venv\Scripts\Activate.ps1
-python payment-service/server.py
-```
+Default gRPC ports are Product `50051`, Order `50052`, and Authentication `50054`. Order requires the configured public JWT key at startup. Service addresses, ports, and downstream timeouts are configurable with the variables in `.env.example`.
 
-Default gRPC ports are Product `50051`, Order `50052`, Payment `50053`, and Authentication `50054`. Order requires the configured public JWT key at startup. Service addresses, ports, and downstream timeouts are configurable with the variables in `.env.example`.
-
-With PostgreSQL, Auth, Product, Order, and Payment Services running and migrations applied, use the Order Service environment for its live integration tests:
+With PostgreSQL, Auth, Product, and Order Services running and migrations applied, use the Order Service environment for its live integration tests:
 
 ```powershell
 .\order-service\.venv\Scripts\Activate.ps1
 python -m pytest order-service\tests\ -v
 ```
 
-The tests use real gRPC clients and the running Product and Payment Services. They create uniquely named products and clean up only their own order, payment, product, inventory, and item records. Product and Payment Service outage cases use isolated temporary Order Service gRPC listeners while retaining the real dependent service for the other call.
+The tests use real gRPC clients and the running Product Service. They create uniquely named products and clean up only their own order, product, inventory, and item records. Product Service outage coverage uses an isolated temporary Order Service gRPC listener.
 
-Order workflow caveat: PostgreSQL and the two downstream gRPC services do not share a distributed transaction. If payment succeeds but Product Service subsequently fails to decrement stock, the order remains `PAID` and the RPC reports the stock-update error. With multiple products, a later stock-update failure can also occur after earlier product stocks were decremented. Payment reconciliation, compensation/refunds, and retries are not implemented.
+Order, Product, and PostgreSQL do not share a distributed transaction. If an inventory update fails, the Order Service compensates prior successful stock updates and marks the order failed; a rollback failure is logged and surfaced as an internal error. If the order cannot be confirmed after inventory updates, it attempts the same compensation. No retries or circuit breakers are used.
 
 ## End-to-end integration tests
 
-The authenticated Order test fixtures register a temporary user through Auth Service, log in to obtain a real token, and attach it to the Order RPC metadata. Run these tests only after all four gRPC services and the additive migrations are ready.
+The authenticated Order test fixtures register a temporary user through Auth Service, log in to obtain a real token, and attach it to the Order RPC metadata. Run these tests only after all three gRPC services and the ownership migration are ready.
 
-Start PostgreSQL and all four gRPC services as described above, then run end-to-end workflows using the root environment:
+Start PostgreSQL and all three gRPC services as described above, then run end-to-end workflows using the root environment:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python -m pytest tests\e2e\ -v
 ```
 
-These tests use real gRPC clients against ports `50051` through `50054` and obtain a real JWT from Auth Service. The success example creates a product at `19.95` with stock `10`, places an order for `2`, verifies the `39.90` total and payment record, and confirms stock falls to `8`. The failure example arranges an odd order ID, then verifies `PAYMENT_FAILED` / `FAILED` and stock remaining at `10`.
+These tests use real gRPC clients against Product `50051`, Order `50052`, and Authentication `50054`, and obtain a real JWT from Auth Service. The success example creates a product at `19.95` with stock `10`, places an order for `2`, verifies the `39.90` total and `CONFIRMED` status, and confirms stock falls to `8`.
 
-Expected rows during a successful flow: one product and inventory row (stock updated from `10` to `8`), one `PAID` order with its item and payment IDs, and one `SUCCESS` payment for the order total. A failed-payment flow creates the same rows, but stores `PAYMENT_FAILED` / `FAILED` and leaves inventory at `10`. Test-created rows are removed during teardown.
+Expected rows during a successful flow: one product and inventory row (stock updated from `10` to `8`), and one `CONFIRMED` order with its item rows. Test-created rows are removed during teardown.
 
-Error coverage includes missing products, insufficient stock, invalid quantities, and Product or Payment Service unavailability. The tests verify records across `products`, `inventory`, `orders`, `order_items`, and `payments`, then delete only records created by the tests. Unavailability cases use isolated temporary Order Service gRPC listeners while calling the real remaining services.
+Error coverage includes missing products, insufficient stock, invalid quantities, and Product Service unavailability. The tests verify records across `products`, `inventory`, `orders`, and `order_items`, then delete only records created by the tests. The unavailability case uses an isolated temporary Order Service gRPC listener while calling the real remaining services.
 
 ## Root-level Gateway integration tests
 
 This suite also requires the Auth Service. Its fixtures register/login through the real Gateway and attach the resulting Bearer token to all order requests.
 
-`tests/gateway/` exercises order creation and retrieval through real HTTP requests to the running FastAPI Gateway. It registers and logs in a fresh test user through the Gateway, then sends the resulting token with order operations. Gateway calls the real Order Service over gRPC; Order Service calls Product and Payment. Tests use direct Product/Payment gRPC only for setup and independent verification. Fixtures do not start or stop services and clean up only test-owned rows.
+`tests/gateway/` exercises order creation and retrieval through real HTTP requests to the running FastAPI Gateway. It registers and logs in a fresh test user through the Gateway, then sends the resulting token with order operations. Gateway calls the real Order Service over gRPC; Order Service calls Product Service. Tests use direct Product gRPC for setup and independent verification. Fixtures do not start or stop services and clean up only test-owned rows.
 
-Start PostgreSQL and the Auth, Product, Order, Payment, and Gateway processes manually in separate terminals as described above. Then, in a root-project terminal:
+Start PostgreSQL and the Auth, Product, Order, and Gateway processes manually in separate terminals as described above. Then, in a root-project terminal:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python -m pytest tests\gateway\ -v
 ```
 
-By default the tests use Product `127.0.0.1:50051`, Order `127.0.0.1:50052`, Payment `127.0.0.1:50053`, Authentication `127.0.0.1:50054`, and Gateway `http://127.0.0.1:8000`.
+By default the tests use Product `127.0.0.1:50051`, Order `127.0.0.1:50052`, Authentication `127.0.0.1:50054`, and Gateway `http://127.0.0.1:8000`.
 
-The Product Service unavailable and Payment Service unavailable cases need extra manually started isolated Order Service and Gateway processes. This avoids disrupting shared services: run the isolated Order instances with distinct ports and one downstream address set to a known-closed local port, then point separate Gateway instances at those Order ports. Configure `MINICART_PRODUCT_UNAVAILABLE_GATEWAY_URL` and `MINICART_PAYMENT_UNAVAILABLE_GATEWAY_URL` in the test terminal. If these URLs are unset, only those two outage tests are skipped.
+The Product Service unavailable case needs an extra manually started isolated Order Service and Gateway process. This avoids disrupting shared services: run the isolated Order instance on a distinct port with Product Service set to a known-closed local port, then point a separate Gateway instance at that Order port. Configure `MINICART_PRODUCT_UNAVAILABLE_GATEWAY_URL` in the test terminal. If it is unset, only the outage test is skipped.
 
 Example Product Service outage setup (each code block in its own terminal):
 
 ```powershell
-$env:ORDER_SERVICE_PORT = "50054"
+$env:ORDER_SERVICE_PORT = "50053"
 $env:PRODUCT_SERVICE_ADDRESS = "127.0.0.1:59991"
-$env:PAYMENT_SERVICE_ADDRESS = "127.0.0.1:50053"
 .\order-service\.venv\Scripts\Activate.ps1
 python order-service/server.py
 ```
 
 ```powershell
-$env:ORDER_SERVICE_ADDRESS = "127.0.0.1:50054"
+$env:ORDER_SERVICE_ADDRESS = "127.0.0.1:50053"
 $env:ORDER_SERVICE_TIMEOUT_SECONDS = "10"
 .\api-gateway\.venv\Scripts\Activate.ps1
 python -m uvicorn gateway.main:app --app-dir api-gateway --host 127.0.0.1 --port 8001
-```
-
-Example Payment Service outage setup:
-
-```powershell
-$env:ORDER_SERVICE_PORT = "50055"
-$env:PRODUCT_SERVICE_ADDRESS = "127.0.0.1:50051"
-$env:PAYMENT_SERVICE_ADDRESS = "127.0.0.1:59992"
-.\order-service\.venv\Scripts\Activate.ps1
-python order-service/server.py
-```
-
-```powershell
-$env:ORDER_SERVICE_ADDRESS = "127.0.0.1:50055"
-$env:ORDER_SERVICE_TIMEOUT_SECONDS = "10"
-.\api-gateway\.venv\Scripts\Activate.ps1
-python -m uvicorn gateway.main:app --app-dir api-gateway --host 127.0.0.1 --port 8002
 ```
 
 In the terminal running pytest, enable the optional real outage cases:
 
 ```powershell
 $env:MINICART_PRODUCT_UNAVAILABLE_GATEWAY_URL = "http://127.0.0.1:8001"
-$env:MINICART_PAYMENT_UNAVAILABLE_GATEWAY_URL = "http://127.0.0.1:8002"
 .\.venv\Scripts\Activate.ps1
 python -m pytest tests\gateway\ -v
 ```
-
-## Payment Service
-
-The Payment Service implements `ProcessPayment` and `GetPaymentStatus` from `protos/payment.proto`.
-
-Start the server from the project root in Terminal 1 after activating its environment:
-
-```powershell
-.\payment-service\.venv\Scripts\Activate.ps1
-python payment-service/server.py
-```
-
-The service listens on gRPC port `50053`.
-
-In Terminal 2, activate the Payment Service environment and run its live gRPC and PostgreSQL integration tests:
-
-```powershell
-.\payment-service\.venv\Scripts\Activate.ps1
-python -m pytest payment-service\tests\ -v
-```
-
-Set `PAYMENT_SERVICE_ADDRESS` to override the test target (default `127.0.0.1:50053`). The tests require PostgreSQL on port `5432` and a running Payment Service.
-
-Payment processing is a deterministic simulation: a positive, even `order_id` produces `SUCCESS`; a positive, odd `order_id` produces `FAILED`. The payment amount must be positive and valid with at most two decimal places. Both successful and failed results are committed to PostgreSQL and can be retrieved with `GetPaymentStatus`.
-
-Test records are assigned unique database IDs. Cleanup removes only the payment records created by the test fixture.
 
 ## PostgreSQL
 
 Copy `.env.example` to `.env` and set a non-placeholder `DB_PASSWORD`. The `.env` file is ignored by Git.
 
-The Compose PostgreSQL container bootstraps `minicart_auth_db` and runs `docker/postgres/init-databases.sql` to create the Product, Order, and Payment databases. The script is executed automatically when PostgreSQL initializes a new data directory. The named volume is `minicart_service_postgres_data`.
+The Compose PostgreSQL container bootstraps `minicart_auth_db` and runs `docker/postgres/init-databases.sql` to create `minicart_product_db` and `minicart_order_db`. The script runs only when PostgreSQL initializes a new data directory. The named volume is `minicart_service_postgres_data`; this setup does not remove or reset it. If that existing volume contains `minicart_payment_db`, it remains there and is not dropped by this refactor.
 
-For a clean local reset, the following commands remove only the MiniCart PostgreSQL container and its explicitly named data volume. Do not substitute `docker compose down --volumes` if other Compose volumes may be present:
-
-```powershell
-docker compose stop postgres
-docker compose rm -f postgres
-docker volume rm minicart_service_postgres_data
-```
-
-Then create a fresh database container and initialize service-owned schemas:
+Start PostgreSQL and initialize service-owned schemas without resetting the existing volume:
 
 ```powershell
 docker compose up -d postgres
@@ -416,10 +342,10 @@ docker compose exec postgres pg_isready -U minicart_admin -d minicart_auth_db
 Verify database names:
 
 ```powershell
-docker compose exec postgres psql -U minicart_admin -d postgres -Atc "SELECT datname FROM pg_database WHERE datname IN ('minicart_auth_db','minicart_product_db','minicart_order_db','minicart_payment_db') ORDER BY datname"
+docker compose exec postgres psql -U minicart_admin -d postgres -Atc "SELECT datname FROM pg_database WHERE datname IN ('minicart_auth_db','minicart_product_db','minicart_order_db') ORDER BY datname"
 ```
 
-The database listens on local port `5432`. Local service processes connect through `DB_HOST=localhost`; a service container on the Compose network should use `DB_HOST=postgres`. Credentials (`DB_USER` and `DB_PASSWORD`) are shared for this development setup, but each service's SQLAlchemy URL selects only its own database. Stopping PostgreSQL without removing the volume preserves all four databases.
+The database listens on local port `5432`. Local service processes connect through `DB_HOST=localhost`; a service container on the Compose network should use `DB_HOST=postgres`. Credentials (`DB_USER` and `DB_PASSWORD`) are shared for this development setup, but each service's SQLAlchemy URL selects only its own database. Stopping PostgreSQL without removing the volume preserves its existing data.
 
 The database initializer uses the root Python environment to import each service's model metadata in a separate process and create tables in the configured database. It does not create cross-service foreign keys or connect the API Gateway to PostgreSQL.
 
@@ -432,14 +358,8 @@ Generate the Python protobuf and gRPC modules into the `generated` package:
 python generate_protos.py
 ```
 
-The script also generates protobuf `.pyi` files so Pylance can resolve generated message classes. The generated gRPC modules use package-relative imports so they can be imported as `generated.product_pb2`, `generated.product_pb2_grpc`, and similarly for order and payment.
+The script also generates protobuf `.pyi` files so Pylance can resolve generated message classes. The generated gRPC modules use package-relative imports so they can be imported as `generated.auth_pb2`, `generated.product_pb2`, and `generated.order_pb2`.
 
 ## Setup verification
 
-Run `docker compose ps` to check PostgreSQL health, `initialize_databases.py` to initialize and verify service-owned schemas, and the per-service tests described above when you choose to run them. The Auth Service uses `AUTH_DB_NAME`; Product, Order, and Payment use their respective `*_DB_NAME` settings.
-- The database contains `products`, `inventory`, `orders`, `order_items`, and `payments`.
-- gRPC code generation completed; all generated protobuf modules, service stubs, servicers, and RPC methods imported successfully.
-- A temporary persistence marker remained after restarting PostgreSQL; the marker table was removed after the check.
-- Earlier verification: Payment Service passed 13 live gRPC/PostgreSQL integration test cases on port `50053`.
-- Earlier verification: Order Service passed 12 live gRPC integration test cases, including persisted payment IDs/statuses for successful and failed payments. Existing protobuf field numbers were preserved; Payment Service ran on temporary port `50054` because port `50053` was already occupied.
-- Earlier verification: E2E suite passed all 8 live cross-service tests using the existing Payment Service on port `50053`.
+Run `docker compose ps` to check PostgreSQL health, `initialize_databases.py` to initialize and verify service-owned schemas, and the per-service tests described above when you choose to run them. The Auth Service uses `AUTH_DB_NAME`; Product and Order use their respective `*_DB_NAME` settings.

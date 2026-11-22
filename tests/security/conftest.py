@@ -13,9 +13,10 @@ from sqlalchemy.exc import SQLAlchemyError
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ORDER_SERVICE_ROOT = PROJECT_ROOT / "order-service"
 TESTS_ROOT = PROJECT_ROOT / "tests"
-for path in (str(PROJECT_ROOT), str(ORDER_SERVICE_ROOT), str(TESTS_ROOT)):
-    if path not in sys.path:
-        sys.path.insert(0, path)
+for path in (str(TESTS_ROOT), str(PROJECT_ROOT), str(ORDER_SERVICE_ROOT)):
+    if path in sys.path:
+        sys.path.remove(path)
+    sys.path.insert(0, path)
 
 from database_connections import create_service_database_connections
 from generated import product_pb2_grpc
@@ -45,7 +46,6 @@ def require_running_security_stack(service_databases):
     addresses = (
         ("Product Service", _address("PRODUCT", "50051")),
         ("Order Service", _address("ORDER", "50052")),
-        ("Payment Service", _address("PAYMENT", "50053")),
         ("Authentication Service", _address("AUTH", "50054")),
     )
     for service_name, address in addresses:
@@ -80,7 +80,6 @@ def require_running_security_stack(service_databases):
             "auth": ("users",),
             "product": ("products", "inventory"),
             "order": ("orders", "order_items"),
-            "payment": ("payments",),
         }
         for service_name, tables in expected_tables.items():
             with service_databases[service_name]["engine"].connect() as connection:
@@ -128,11 +127,6 @@ def security_records(service_databases):
                 {"product_id": product_id},
             ).scalar_one_or_none()
     if order_id is not None:
-        with service_databases["payment"]["sessions"].begin() as session:
-            session.execute(
-                text("DELETE FROM payments WHERE order_id = :order_id"),
-                {"order_id": order_id},
-            )
         with service_databases["order"]["sessions"].begin() as session:
             session.execute(
                 text("DELETE FROM order_items WHERE order_id = :order_id"),

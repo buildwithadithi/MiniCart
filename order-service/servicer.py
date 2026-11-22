@@ -7,11 +7,10 @@ from google.protobuf.timestamp_pb2 import Timestamp
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from clients.payment_client import PaymentClient
 from clients.product_client import ProductClient
 from database import SessionLocal
 from models import Order, OrderItem
-from generated import order_pb2, order_pb2_grpc, payment_pb2, product_pb2
+from generated import order_pb2, order_pb2_grpc, product_pb2
 from security import authenticated_user_id
 from security_config import JwtVerifier
 
@@ -30,12 +29,6 @@ class ProductClientProtocol(Protocol):
     ) -> product_pb2.CheckStockResponse: ...
 
     def update_stock(self, product_id: int, quantity_delta: int, /) -> int: ...
-
-    def close(self) -> None: ...
-
-
-class PaymentClientProtocol(Protocol):
-    def process_payment(self, order_id: int, amount: str) -> payment_pb2.Payment: ...
 
     def close(self) -> None: ...
 
@@ -68,8 +61,6 @@ def _order_message(order: Order, items: list[OrderItem]) -> order_pb2.Order:
         total_amount=str(order.total_amount),
         status=order.status,
         created_at=_timestamp(order.created_at),
-        payment_id=order.payment_id or 0,
-        payment_status=order.payment_status or "",
         items=[
             order_pb2.OrderItem(
                 id=item.id,
@@ -111,11 +102,9 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
     def __init__(
         self,
         product_address: str | None = None,
-        payment_address: str | None = None,
         *,
         token_verifier: JwtVerifier | None = None,
         product_client: ProductClientProtocol | None = None,
-        payment_client: PaymentClientProtocol | None = None,
     ):
         self.token_verifier = (
             token_verifier
@@ -125,13 +114,9 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
         self.product_client = (
             product_client if product_client is not None else ProductClient(product_address)
         )
-        self.payment_client = (
-            payment_client if payment_client is not None else PaymentClient(payment_address)
-        )
 
     def close(self) -> None:
         self.product_client.close()
-        self.payment_client.close()
 
     def CreateOrder(self, request, context):
         user_id = authenticated_user_id(context, self.token_verifier)
@@ -249,62 +234,48 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
             )
         assert order_id is not None
 
-        payment = None
-        try:
-            payment = self.payment_client.process_payment(
-                order_id=order_id,
-                amount=str(total_amount),
-            )
-        except grpc.RpcError as error:
-            self._set_order_status(order_id, "PAYMENT_FAILED", context)
-            _abort_downstream(
-                context,
-                error,
-                "Payment Service",
-                order_id=order_id,
-            )
-
-        if payment is None:
-            context.abort(
-                grpc.StatusCode.INTERNAL,
-                "Payment Service returned no payment result.",
-            )
-
-        if payment.status not in ("SUCCESS", "FAILED") or payment.id <= 0:
-            self._set_order_payment(
-                order_id,
-                "PAYMENT_FAILED",
-                payment.id if payment.id > 0 else None,
-                payment.status,
-                context,
-            )
-            context.abort(
-                grpc.StatusCode.DATA_LOSS,
-                f"Payment Service returned an invalid result for order {order_id}.",
-            )
-
-        if payment.status == "FAILED":
-            self._set_order_payment(
-                order_id, "PAYMENT_FAILED", payment.id, payment.status, context
-            )
-            return self._get_order_response(order_id, user_id, context)
-
-        self._set_order_payment(order_id, "PAID", payment.id, payment.status, context)
+        updated_stock: list[tuple[int, int]] = []
         for product_id, quantity in required_stock.items():
             try:
                 self.product_client.update_stock(product_id, -quantity)
             except grpc.RpcError as error:
-                logger.exception(
-                    "Order %s is paid, but stock update failed for product %s.",
-                    order_id,
-                    product_id,
-                )
+                rollback_failures = self._restore_inventory(order_id, updated_stock)
+                if not self._set_order_status(order_id, "FAILED", context):
+                    context.abort(
+                        grpc.StatusCode.UNAVAILABLE,
+                        "The order database is temporarily unavailable.",
+                    )
+                if rollback_failures:
+                    context.abort(
+                        grpc.StatusCode.INTERNAL,
+                        f"Order {order_id} failed and inventory rollback failed "
+                        f"for products {rollback_failures}.",
+                    )
                 _abort_downstream(
                     context,
                     error,
-                    "Product Service stock update",
+                    "Product Service inventory update",
                     order_id=order_id,
                 )
+            updated_stock.append((product_id, quantity))
+
+        if not self._set_order_status(order_id, "CONFIRMED", context):
+            rollback_failures = self._restore_inventory(order_id, updated_stock)
+            if not self._set_order_status(order_id, "FAILED", context):
+                context.abort(
+                    grpc.StatusCode.UNAVAILABLE,
+                    "The order database is temporarily unavailable.",
+                )
+            if rollback_failures:
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    f"Order {order_id} could not be confirmed and inventory rollback "
+                    f"failed for products {rollback_failures}.",
+                )
+            context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                f"Order {order_id} could not be confirmed; inventory was restored.",
+            )
 
         return self._get_order_response(order_id, user_id, context)
 
@@ -315,7 +286,7 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
         return self._get_order_response(request.order_id, user_id, context)
 
     @staticmethod
-    def _set_order_status(order_id: int, status: str, context) -> None:
+    def _set_order_status(order_id: int, status: str, context) -> bool:
         try:
             with SessionLocal.begin() as session:
                 order = session.get(Order, order_id)
@@ -328,40 +299,24 @@ class OrderServiceServicer(order_pb2_grpc.OrderServiceServicer):
                     order.status = status
         except SQLAlchemyError:
             logger.exception("Database failure while updating order %s.", order_id)
-            context.abort(
-                grpc.StatusCode.UNAVAILABLE,
-                "The order database is temporarily unavailable.",
-            )
+            return False
+        return True
 
-    @staticmethod
-    def _set_order_payment(
-        order_id: int,
-        status: str,
-        payment_id: int | None,
-        payment_status: str,
-        context,
-    ) -> None:
-        try:
-            with SessionLocal.begin() as session:
-                order = session.get(Order, order_id)
-                if order is None:
-                    context.abort(
-                        grpc.StatusCode.NOT_FOUND,
-                        f"Order {order_id} was not found.",
-                    )
-                if order is not None:
-                    order.status = status
-                    order.payment_id = payment_id
-                    order.payment_status = payment_status
-        except SQLAlchemyError:
-            logger.exception(
-                "Database failure while saving payment details for order %s.",
-                order_id,
-            )
-            context.abort(
-                grpc.StatusCode.UNAVAILABLE,
-                "The order database is temporarily unavailable.",
-            )
+    def _restore_inventory(
+        self, order_id: int, updated_stock: list[tuple[int, int]]
+    ) -> list[int]:
+        failed_product_ids = []
+        for product_id, quantity in reversed(updated_stock):
+            try:
+                self.product_client.update_stock(product_id, quantity)
+            except grpc.RpcError:
+                logger.exception(
+                    "Order %s inventory rollback failed for product %s.",
+                    order_id,
+                    product_id,
+                )
+                failed_product_ids.append(product_id)
+        return failed_product_ids
 
     @staticmethod
     def _get_order_response(order_id: int, user_id: int, context):

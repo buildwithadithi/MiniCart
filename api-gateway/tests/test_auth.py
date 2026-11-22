@@ -52,10 +52,8 @@ class FakeOrderClient:
             order=order_pb2.Order(
                 id=1,
                 total_amount="1.00",
-                status="PAID",
+                status="CONFIRMED",
                 created_at=created_at,
-                payment_id=2,
-                payment_status="SUCCESS",
             )
         )
 
@@ -67,7 +65,7 @@ class FakeOrderClient:
             order=order_pb2.Order(
                 id=order_id,
                 total_amount="1.00",
-                status="PAID",
+                status="CONFIRMED",
                 created_at=created_at,
             )
         )

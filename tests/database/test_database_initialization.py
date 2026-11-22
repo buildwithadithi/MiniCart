@@ -16,14 +16,13 @@ EXPECTED_TABLES = {
     "auth": {"users"},
     "product": {"products", "inventory"},
     "order": {"orders", "order_items"},
-    "payment": {"payments"},
 }
 AUTH_MIGRATION = (
     PROJECT_ROOT / "auth-service" / "migrations" / "0001_create_users.sql"
 )
 ORDER_MIGRATIONS = (
-    PROJECT_ROOT / "order-service" / "migrations" / "0001_add_payment_details.sql",
     PROJECT_ROOT / "order-service" / "migrations" / "0002_add_user_id.sql",
+    PROJECT_ROOT / "order-service" / "migrations" / "0003_remove_legacy_order_columns.sql",
 )
 
 
@@ -59,7 +58,6 @@ def test_compose_configures_postgres_database_initialization():
     assert environment["POSTGRES_DB"] == "minicart_auth_db"
     assert environment["MINICART_PRODUCT_DB"] == "minicart_product_db"
     assert environment["MINICART_ORDER_DB"] == "minicart_order_db"
-    assert environment["MINICART_PAYMENT_DB"] == "minicart_payment_db"
     assert any(
         volume["type"] == "bind"
         and Path(volume["source"])
@@ -71,7 +69,7 @@ def test_compose_configures_postgres_database_initialization():
     )
 
 
-def test_database_init_script_creates_four_accessible_databases_and_is_idempotent(
+def test_database_init_script_creates_three_accessible_databases_and_is_idempotent(
     postgres_cluster,
 ):
     database_names = set(postgres_cluster["databases"].values())
@@ -172,7 +170,7 @@ def test_auth_migration_creates_users_on_a_fresh_database_and_is_idempotent(
             assert row[0] == 1
 
 
-def test_order_migrations_add_columns_and_index_to_fresh_baseline_database(
+def test_order_migrations_add_ownership_and_remove_legacy_columns(
     postgres_cluster,
 ):
     database = f"{postgres_cluster['databases']['order']}_migration"
@@ -185,7 +183,9 @@ def test_order_migrations_add_columns_and_index_to_fresh_baseline_database(
             id SERIAL PRIMARY KEY,
             total_amount NUMERIC(12, 2) NOT NULL,
             status VARCHAR(32) NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            payment_id INTEGER,
+            payment_status VARCHAR(32)
         );
         """,
     )
@@ -209,8 +209,6 @@ def test_order_migrations_add_columns_and_index_to_fresh_baseline_database(
                 "total_amount",
                 "status",
                 "created_at",
-                "payment_id",
-                "payment_status",
                 "user_id",
             }
             cursor.execute(

@@ -16,10 +16,8 @@ def _order_message() -> order_pb2.Order:
     return order_pb2.Order(
         id=42,
         total_amount="39.90",
-        status="PAID",
+        status="CONFIRMED",
         created_at=created_at,
-        payment_id=88,
-        payment_status="SUCCESS",
         items=[
             order_pb2.OrderItem(
                 id=7,
@@ -108,7 +106,7 @@ def test_create_order_converts_request_and_response(
     assert response.json() == {
         "id": 42,
         "total_amount": "39.90",
-        "status": "PAID",
+        "status": "CONFIRMED",
         "created_at": "2026-01-02T03:04:05Z",
         "items": [
             {
@@ -118,8 +116,6 @@ def test_create_order_converts_request_and_response(
                 "unit_price": "19.95",
             }
         ],
-        "payment_id": 88,
-        "payment_status": "SUCCESS",
     }
 
 
@@ -129,8 +125,6 @@ def test_get_order_converts_response(client, order_client, access_token):
     assert response.status_code == 200
     assert order_client.requested_order_id == 42
     assert order_client.authorization_token == access_token
-    assert response.json()["payment_id"] == 88
-    assert response.json()["payment_status"] == "SUCCESS"
     assert response.json()["items"][0]["unit_price"] == "19.95"
 
 

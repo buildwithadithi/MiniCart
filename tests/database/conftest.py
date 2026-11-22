@@ -74,7 +74,6 @@ def postgres_cluster():
         "auth": f"mc_{suffix}_auth",
         "product": f"mc_{suffix}_product",
         "order": f"mc_{suffix}_order",
-        "payment": f"mc_{suffix}_payment",
     }
     _docker(
         "run",
@@ -144,7 +143,6 @@ def postgres_cluster():
         init_environment = {
             "MINICART_PRODUCT_DB": databases["product"],
             "MINICART_ORDER_DB": databases["order"],
-            "MINICART_PAYMENT_DB": databases["payment"],
         }
         init_sql = (
             PROJECT_ROOT / "docker" / "postgres" / "init-databases.sql"
@@ -196,7 +194,6 @@ def initializer_environment(postgres_cluster):
             "AUTH_DB_NAME": postgres_cluster["databases"]["auth"],
             "PRODUCT_DB_NAME": postgres_cluster["databases"]["product"],
             "ORDER_DB_NAME": postgres_cluster["databases"]["order"],
-            "PAYMENT_DB_NAME": postgres_cluster["databases"]["payment"],
         }
     )
     return environment
