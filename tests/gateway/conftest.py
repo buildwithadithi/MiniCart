@@ -12,12 +12,14 @@ from sqlalchemy.exc import SQLAlchemyError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-ORDER_SERVICE_ROOT = PROJECT_ROOT / "order-service"
-for path in (str(PROJECT_ROOT), str(ORDER_SERVICE_ROOT)):
+TESTS_ROOT = PROJECT_ROOT / "tests"
+for path in (str(PROJECT_ROOT), str(TESTS_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
 load_dotenv(PROJECT_ROOT / ".env")
+
+from database_connections import create_service_database_connections
 
 
 def _service_addresses() -> tuple[tuple[str, str], ...]:
@@ -64,14 +66,16 @@ def _gateway_url() -> str:
 @pytest.fixture(scope="session")
 def database_components():
     try:
-        from database import SessionLocal, engine
+        connections = create_service_database_connections()
     except (RuntimeError, ValueError) as error:
         pytest.fail(
             "MiniCart PostgreSQL configuration is unavailable. Check DB settings "
             f"in the project .env file. Details: {error}",
             pytrace=False,
         )
-    return SessionLocal, engine
+    yield connections
+    for service in connections.values():
+        service["engine"].dispose()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -89,12 +93,18 @@ def require_running_stack(database_components):
         finally:
             channel.close()
 
-    _, engine = database_components
     try:
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
-            connection.execute(text("SELECT user_id FROM orders LIMIT 0"))
-            connection.execute(text("SELECT id FROM users LIMIT 0"))
+        for service_name, expected_tables in {
+            "auth": ("users",),
+            "product": ("products", "inventory"),
+            "order": ("orders", "order_items"),
+            "payment": ("payments",),
+        }.items():
+            engine = database_components[service_name]["engine"]
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+                for table in expected_tables:
+                    connection.execute(text(f"SELECT * FROM {table} LIMIT 0"))
     except SQLAlchemyError as error:
         pytest.fail(
             "PostgreSQL or the authentication/ownership schema is unavailable. "
@@ -232,10 +242,13 @@ def created_records(database_components):
     records = {"order_ids": set(), "product_ids": set(), "user_ids": set()}
     yield records
 
-    session_factory, _ = database_components
+    order_sessions = database_components["order"]["sessions"]
+    payment_sessions = database_components["payment"]["sessions"]
+    product_sessions = database_components["product"]["sessions"]
+    auth_sessions = database_components["auth"]["sessions"]
     product_ids = list(records["product_ids"])
     order_ids = set(records["order_ids"])
-    with session_factory.begin() as session:
+    with order_sessions.begin() as session:
         if product_ids:
             related_order_ids = session.execute(
                 text(
@@ -246,12 +259,14 @@ def created_records(database_components):
             ).scalars()
             order_ids.update(related_order_ids)
 
-        if order_ids:
-            order_id_list = list(order_ids)
+    if order_ids:
+        order_id_list = list(order_ids)
+        with payment_sessions.begin() as session:
             session.execute(
                 text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
                 {"order_ids": order_id_list},
             )
+        with order_sessions.begin() as session:
             session.execute(
                 text("DELETE FROM order_items WHERE order_id = ANY(:order_ids)"),
                 {"order_ids": order_id_list},
@@ -261,7 +276,8 @@ def created_records(database_components):
                 {"order_ids": order_id_list},
             )
 
-        if product_ids:
+    if product_ids:
+        with product_sessions.begin() as session:
             session.execute(
                 text("DELETE FROM inventory WHERE product_id = ANY(:product_ids)"),
                 {"product_ids": product_ids},
@@ -270,7 +286,8 @@ def created_records(database_components):
                 text("DELETE FROM products WHERE id = ANY(:product_ids)"),
                 {"product_ids": product_ids},
             )
-        if records["user_ids"]:
+    if records["user_ids"]:
+        with auth_sessions.begin() as session:
             session.execute(
                 text("DELETE FROM users WHERE id = ANY(:user_ids)"),
                 {"user_ids": list(records["user_ids"])},

@@ -65,7 +65,7 @@ def prepare_next_payment_outcome(
 
 
 def test_successful_end_to_end_order_workflow(
-    product_stub, order_stub, payment_stub, created_records
+    product_stub, order_stub, payment_stub, created_records, service_databases
 ):
     prepare_next_payment_outcome(
         order_stub, product_stub, created_records, "SUCCESS"
@@ -124,7 +124,7 @@ def test_successful_end_to_end_order_workflow(
     assert persisted_order.payment_status == "SUCCESS"
     assert len(persisted_order.items) == 1
 
-    with SessionLocal() as session:
+    with service_databases["product"]["sessions"]() as session:
         product_row = session.execute(
             text("SELECT name, price FROM products WHERE id = :id"),
             {"id": created_product.id},
@@ -133,6 +133,7 @@ def test_successful_end_to_end_order_workflow(
             text("SELECT available_stock FROM inventory WHERE product_id = :id"),
             {"id": created_product.id},
         ).one()
+    with service_databases["order"]["sessions"]() as session:
         order_row = session.execute(
             text(
                 "SELECT total_amount, status, payment_id, payment_status "
@@ -147,6 +148,7 @@ def test_successful_end_to_end_order_workflow(
             ),
             {"id": order.id},
         ).all()
+    with service_databases["payment"]["sessions"]() as session:
         payment_row = session.execute(
             text(
                 "SELECT id, order_id, amount, status FROM payments WHERE id = :id"
@@ -172,7 +174,7 @@ def test_successful_end_to_end_order_workflow(
 
 
 def test_failed_payment_keeps_stock_and_persists_payment(
-    product_stub, order_stub, payment_stub, created_records
+    product_stub, order_stub, payment_stub, created_records, service_databases
 ):
     prepare_next_payment_outcome(
         order_stub, product_stub, created_records, "FAILED"
@@ -210,21 +212,26 @@ def test_failed_payment_keeps_stock_and_persists_payment(
     assert persisted_order.payment_status == payment.status
     assert persisted_order.status == "PAYMENT_FAILED"
 
-    with SessionLocal() as session:
-        rows = session.execute(
+    with service_databases["order"]["sessions"]() as session:
+        order_row = session.execute(
             text(
-                "SELECT o.status, o.payment_id, o.payment_status, "
-                "p.id AS actual_payment_id, p.amount, p.status AS actual_payment_status "
-                "FROM orders AS o JOIN payments AS p ON p.order_id = o.id "
-                "WHERE o.id = :order_id"
+                "SELECT status, payment_id, payment_status FROM orders "
+                "WHERE id = :order_id"
+            ),
+            {"order_id": order.id},
+        ).one()
+    with service_databases["payment"]["sessions"]() as session:
+        payment_row = session.execute(
+            text(
+                "SELECT id, amount, status FROM payments WHERE order_id = :order_id"
             ),
             {"order_id": order.id},
         ).one()
 
-    assert rows.status == "PAYMENT_FAILED"
-    assert rows.payment_id == rows.actual_payment_id == order.payment_id
-    assert rows.payment_status == rows.actual_payment_status == "FAILED"
-    assert rows.amount == Decimal("17.50")
+    assert order_row.status == "PAYMENT_FAILED"
+    assert order_row.payment_id == payment_row.id == order.payment_id
+    assert order_row.payment_status == payment_row.status == "FAILED"
+    assert payment_row.amount == Decimal("17.50")
 
 
 def test_nonexistent_product_returns_not_found(order_stub):
@@ -283,7 +290,11 @@ def test_product_service_unavailable(isolated_order_stub, monkeypatch):
 
 
 def test_payment_service_unavailable(
-    isolated_order_stub, product_stub, created_records, monkeypatch
+    isolated_order_stub,
+    product_stub,
+    created_records,
+    monkeypatch,
+    service_databases,
 ):
     monkeypatch.setenv("PAYMENT_SERVICE_TIMEOUT_SECONDS", "0.25")
     order_stub = isolated_order_stub(payment_address="127.0.0.1:1")
@@ -302,11 +313,12 @@ def test_payment_service_unavailable(
     stock = product_stub.CheckStock(
         product_pb2.CheckStockRequest(product_id=product.id), timeout=5
     )
-    with SessionLocal() as session:
+    with service_databases["order"]["sessions"]() as session:
         order_row = session.execute(
             text("SELECT status, payment_id, payment_status FROM orders WHERE id = :id"),
             {"id": order_id},
         ).one()
+    with service_databases["payment"]["sessions"]() as session:
         payment_count = session.execute(
             text("SELECT count(*) FROM payments WHERE order_id = :id"),
             {"id": order_id},

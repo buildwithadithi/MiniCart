@@ -12,11 +12,12 @@ from sqlalchemy.exc import SQLAlchemyError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ORDER_SERVICE_ROOT = PROJECT_ROOT / "order-service"
-for path in (str(PROJECT_ROOT), str(ORDER_SERVICE_ROOT)):
+TESTS_ROOT = PROJECT_ROOT / "tests"
+for path in (str(PROJECT_ROOT), str(ORDER_SERVICE_ROOT), str(TESTS_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from database import SessionLocal, engine
+from database_connections import create_service_database_connections
 from generated import product_pb2_grpc
 
 
@@ -24,8 +25,23 @@ def _address(service: str, port: str) -> str:
     return os.getenv(f"{service}_SERVICE_ADDRESS", f"127.0.0.1:{port}")
 
 
+@pytest.fixture(scope="session")
+def service_databases():
+    try:
+        connections = create_service_database_connections()
+    except (RuntimeError, ValueError) as error:
+        pytest.fail(
+            "MiniCart PostgreSQL configuration is unavailable: "
+            f"{error}",
+            pytrace=False,
+        )
+    yield connections
+    for service in connections.values():
+        service["engine"].dispose()
+
+
 @pytest.fixture(scope="session", autouse=True)
-def require_running_security_stack():
+def require_running_security_stack(service_databases):
     addresses = (
         ("Product Service", _address("PRODUCT", "50051")),
         ("Order Service", _address("ORDER", "50052")),
@@ -60,10 +76,17 @@ def require_running_security_stack():
         )
 
     try:
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
-            connection.execute(text("SELECT user_id FROM orders LIMIT 0"))
-            connection.execute(text("SELECT id FROM users LIMIT 0"))
+        expected_tables = {
+            "auth": ("users",),
+            "product": ("products", "inventory"),
+            "order": ("orders", "order_items"),
+            "payment": ("payments",),
+        }
+        for service_name, tables in expected_tables.items():
+            with service_databases[service_name]["engine"].connect() as connection:
+                connection.execute(text("SELECT 1"))
+                for table in tables:
+                    connection.execute(text(f"SELECT * FROM {table} LIMIT 0"))
     except (SQLAlchemyError, RuntimeError) as error:
         pytest.fail(
             "PostgreSQL is unavailable or the auth/ownership migrations have not "
@@ -89,14 +112,14 @@ def product_stub():
 
 
 @pytest.fixture
-def security_records():
+def security_records(service_databases):
     records = {"user_ids": set(), "product_id": None, "order_id": None}
     yield records
 
-    with SessionLocal.begin() as session:
-        order_id = records["order_id"]
-        product_id = records["product_id"]
-        if order_id is None and product_id is not None:
+    order_id = records["order_id"]
+    product_id = records["product_id"]
+    if order_id is None and product_id is not None:
+        with service_databases["order"]["sessions"].begin() as session:
             order_id = session.execute(
                 text(
                     "SELECT DISTINCT order_id FROM order_items "
@@ -104,11 +127,13 @@ def security_records():
                 ),
                 {"product_id": product_id},
             ).scalar_one_or_none()
-        if order_id is not None:
+    if order_id is not None:
+        with service_databases["payment"]["sessions"].begin() as session:
             session.execute(
                 text("DELETE FROM payments WHERE order_id = :order_id"),
                 {"order_id": order_id},
             )
+        with service_databases["order"]["sessions"].begin() as session:
             session.execute(
                 text("DELETE FROM order_items WHERE order_id = :order_id"),
                 {"order_id": order_id},
@@ -117,7 +142,8 @@ def security_records():
                 text("DELETE FROM orders WHERE id = :order_id"),
                 {"order_id": order_id},
             )
-        if product_id is not None:
+    if product_id is not None:
+        with service_databases["product"]["sessions"].begin() as session:
             session.execute(
                 text("DELETE FROM inventory WHERE product_id = :product_id"),
                 {"product_id": product_id},
@@ -126,7 +152,8 @@ def security_records():
                 text("DELETE FROM products WHERE id = :product_id"),
                 {"product_id": product_id},
             )
-        if records["user_ids"]:
+    if records["user_ids"]:
+        with service_databases["auth"]["sessions"].begin() as session:
             session.execute(
                 text("DELETE FROM users WHERE id = ANY(:user_ids)"),
                 {"user_ids": list(records["user_ids"])},

@@ -96,8 +96,7 @@ def test_successful_order_and_payment_through_gateway(
     )
     assert remaining_stock.available_stock == 8
 
-    session_factory, _ = database_components
-    with session_factory() as session:
+    with database_components["product"]["sessions"]() as session:
         product_row = session.execute(
             text(
                 "SELECT p.name, p.price, i.available_stock "
@@ -106,6 +105,7 @@ def test_successful_order_and_payment_through_gateway(
             ),
             {"product_id": product.id},
         ).one()
+    with database_components["order"]["sessions"]() as session:
         order_row = session.execute(
             text(
                 "SELECT total_amount, status, payment_id, payment_status "
@@ -120,6 +120,7 @@ def test_successful_order_and_payment_through_gateway(
             ),
             {"order_id": order["id"]},
         ).all()
+    with database_components["payment"]["sessions"]() as session:
         payment_row = session.execute(
             text(
                 "SELECT id, order_id, amount, status FROM payments WHERE id = :id"
@@ -178,8 +179,7 @@ def test_failed_payment_keeps_inventory_unchanged(
     assert Decimal(payment.amount) == Decimal("17.50")
     assert stock_after.available_stock == initial_stock.available_stock == 10
 
-    session_factory, _ = database_components
-    with session_factory() as session:
+    with database_components["order"]["sessions"]() as session:
         order_row = session.execute(
             text(
                 "SELECT status, payment_id, payment_status FROM orders "
@@ -187,6 +187,7 @@ def test_failed_payment_keeps_inventory_unchanged(
             ),
             {"order_id": order["id"]},
         ).one()
+    with database_components["payment"]["sessions"]() as session:
         payment_row = session.execute(
             text(
                 "SELECT id, order_id, amount, status FROM payments "
@@ -285,8 +286,7 @@ def test_payment_service_unavailable_does_not_reduce_inventory(
     )
     assert stock_after.available_stock == initial_stock.available_stock == 10
 
-    session_factory, _ = database_components
-    with session_factory() as session:
+    with database_components["order"]["sessions"]() as session:
         order_row = session.execute(
             text(
                 "SELECT o.id, o.status, o.payment_id, o.payment_status "
@@ -295,6 +295,7 @@ def test_payment_service_unavailable_does_not_reduce_inventory(
             ),
             {"product_id": product.id},
         ).one()
+    with database_components["payment"]["sessions"]() as session:
         payment_count = session.execute(
             text("SELECT count(*) FROM payments WHERE order_id = :order_id"),
             {"order_id": order_row.id},

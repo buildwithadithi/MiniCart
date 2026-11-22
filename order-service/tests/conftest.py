@@ -12,14 +12,32 @@ from sqlalchemy.exc import SQLAlchemyError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SERVICE_ROOT = PROJECT_ROOT / "order-service"
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(SERVICE_ROOT))
+TESTS_ROOT = PROJECT_ROOT / "tests"
+for path in (str(PROJECT_ROOT), str(SERVICE_ROOT), str(TESTS_ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
-from database import SessionLocal, engine
+from database import engine
+from database_connections import create_service_database_connections
 from models import Order, OrderItem
 from generated import auth_pb2, auth_pb2_grpc
 from generated import order_pb2_grpc, payment_pb2_grpc, product_pb2_grpc
 from servicer import OrderServiceServicer
+
+
+@pytest.fixture(scope="session")
+def service_databases():
+    try:
+        connections = create_service_database_connections()
+    except (RuntimeError, ValueError) as error:
+        pytest.fail(
+            "MiniCart PostgreSQL configuration is unavailable: "
+            f"{error}",
+            pytrace=False,
+        )
+    yield connections
+    for service in connections.values():
+        service["engine"].dispose()
 
 
 @pytest.fixture(scope="session")
@@ -58,7 +76,7 @@ def require_running_services_and_database():
 
 
 @pytest.fixture(scope="session")
-def auth_token(require_running_services_and_database):
+def auth_token(require_running_services_and_database, service_databases):
     address = os.getenv("AUTH_SERVICE_ADDRESS", "127.0.0.1:50054")
     channel = grpc.insecure_channel(address)
     stub = auth_pb2_grpc.AuthServiceStub(channel)
@@ -82,7 +100,8 @@ def auth_token(require_running_services_and_database):
     finally:
         channel.close()
         if registration is not None:
-            with SessionLocal.begin() as session:
+            order_ids = []
+            with service_databases["order"]["sessions"].begin() as session:
                 order_ids = list(
                     session.execute(
                         text("SELECT id FROM orders WHERE user_id = :user_id"),
@@ -91,10 +110,6 @@ def auth_token(require_running_services_and_database):
                 )
                 if order_ids:
                     session.execute(
-                        text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
-                        {"order_ids": order_ids},
-                    )
-                    session.execute(
                         text("DELETE FROM order_items WHERE order_id = ANY(:order_ids)"),
                         {"order_ids": order_ids},
                     )
@@ -102,6 +117,13 @@ def auth_token(require_running_services_and_database):
                         text("DELETE FROM orders WHERE id = ANY(:order_ids)"),
                         {"order_ids": order_ids},
                     )
+            if order_ids:
+                with service_databases["payment"]["sessions"].begin() as session:
+                    session.execute(
+                        text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
+                        {"order_ids": order_ids},
+                    )
+            with service_databases["auth"]["sessions"].begin() as session:
                 session.execute(
                     text("DELETE FROM users WHERE id = :user_id"),
                     {"user_id": registration.user_id},
@@ -150,7 +172,7 @@ def payment_stub(require_running_services_and_database):
 
 
 @pytest.fixture
-def test_records():
+def test_records(service_databases):
     records = {"order_ids": [], "product_ids": []}
     yield records
 
@@ -159,15 +181,21 @@ def test_records():
     if not order_ids and not product_ids:
         return
 
-    with SessionLocal.begin() as session:
-        if order_ids:
+    if order_ids:
+        with service_databases["order"]["sessions"].begin() as session:
             session.query(OrderItem).filter(
                 OrderItem.order_id.in_(order_ids)
             ).delete(synchronize_session=False)
             session.query(Order).filter(Order.id.in_(order_ids)).delete(
                 synchronize_session=False
             )
-        if product_ids:
+        with service_databases["payment"]["sessions"].begin() as session:
+            session.execute(
+                text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
+                {"order_ids": order_ids},
+            )
+    if product_ids:
+        with service_databases["product"]["sessions"].begin() as session:
             session.execute(
                 text("DELETE FROM inventory WHERE product_id = ANY(:product_ids)"),
                 {"product_ids": product_ids},
@@ -175,13 +203,6 @@ def test_records():
             session.execute(
                 text("DELETE FROM products WHERE id = ANY(:product_ids)"),
                 {"product_ids": product_ids},
-            )
-
-    if order_ids:
-        with SessionLocal.begin() as session:
-            session.execute(
-                text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
-                {"order_ids": order_ids},
             )
 
 

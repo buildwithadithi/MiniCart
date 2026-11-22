@@ -1,6 +1,6 @@
 # MiniCart
 
-MiniCart is a Python microservices e-commerce application with service-owned SQLAlchemy models, shared PostgreSQL development infrastructure, Protocol Buffer contracts, and a FastAPI API Gateway.
+MiniCart is a Python microservices e-commerce application with service-owned SQLAlchemy models, one PostgreSQL container with separate Authentication, Product, Order, and Payment databases, Protocol Buffer contracts, and a FastAPI API Gateway.
 
 ## Technology stack
 
@@ -43,13 +43,15 @@ minicart/
 ├── protos/                 # Auth, Product, Order, and Payment RPC contracts
 ├── generated/              # Generated Python protobuf/gRPC package
 ├── docker-compose.yml      # Local PostgreSQL service and named volume
+├── docker/postgres/        # First-run initialization for service databases
+├── initialize_databases.py # Creates and verifies each service's tables
 ├── .dockerignore           # Excludes local environments, secrets, and caches
 ├── .env.example            # Placeholder local configuration
 ├── generate_protos.py      # Reproducible gRPC code generation
 └── requirements.txt        # Complete development dependencies
 ```
 
-Each service defines its own SQLAlchemy `Base` and owns its tables. The order and payment services intentionally do not declare foreign keys to tables owned by other services. The product inventory table references the product table within its own service.
+Each service defines its own SQLAlchemy `Base`, connects only to its own PostgreSQL database, and owns its tables. The order and payment services intentionally do not declare foreign keys to tables owned by other services. The product inventory table references the product table within its own service.
 
 ## Environment and dependency management
 
@@ -134,18 +136,17 @@ Set `JWT_PRIVATE_KEY_PATH` and `JWT_PUBLIC_KEY_PATH` in `.env` to those files. R
 
 `JWT_ISSUER` defaults to `minicart-auth`, `JWT_AUDIENCE` to `minicart-api`, and `JWT_ACCESS_TOKEN_SECONDS` to `900`. The Gateway reads `AUTH_SERVICE_ADDRESS` (default `localhost:50054`); its timeout is configurable with `AUTH_SERVICE_TIMEOUT_SECONDS`.
 
-### Database migrations
+### Database migrations and ownership
 
-The Authentication migration creates `users`. The Order migration adds nullable `orders.user_id` and an index. Neither migration creates a cross-service foreign key; the Order migration does not rewrite or delete existing rows. Historical orders remain valid with `user_id IS NULL` and are intentionally not visible through authenticated order retrieval because no owner can be established safely.
+Authentication owns `minicart_auth_db` and its `users` table. Product owns `minicart_product_db` (`products`, `inventory`); Order owns `minicart_order_db` (`orders`, `order_items`); Payment owns `minicart_payment_db` (`payments`). Set `AUTH_DB_NAME`, `PRODUCT_DB_NAME`, `ORDER_DB_NAME`, and `PAYMENT_DB_NAME` to override these local database names. Each service ignores `DB_NAME` and uses only its own service-specific database setting.
 
-Apply migrations from the project root after PostgreSQL is healthy:
+The additive Authentication and Order migrations remain for existing deployments. For a fresh setup, `initialize_databases.py` uses each SQLAlchemy model set to create and verify its tables in its service-owned database. It is safe to rerun:
 
 ```powershell
-Get-Content auth-service/migrations/0001_create_users.sql | docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
-Get-Content order-service/migrations/0002_add_user_id.sql | docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+.\.venv\Scripts\python.exe initialize_databases.py
 ```
 
-These are additive, idempotent migrations. Keep previously applied migrations, and do not remove the PostgreSQL volume.
+The Order migration adds nullable `orders.user_id` and an index without a cross-service foreign key. Historical orders in existing deployments remain valid with `user_id IS NULL` and are not visible through authenticated order retrieval because no owner can be established safely.
 
 ## FastAPI API Gateway
 
@@ -393,28 +394,34 @@ Test records are assigned unique database IDs. Cleanup removes only the payment 
 
 Copy `.env.example` to `.env` and set a non-placeholder `DB_PASSWORD`. The `.env` file is ignored by Git.
 
-Start PostgreSQL and wait for its health check:
+The Compose PostgreSQL container bootstraps `minicart_auth_db` and runs `docker/postgres/init-databases.sql` to create the Product, Order, and Payment databases. The script is executed automatically when PostgreSQL initializes a new data directory. The named volume is `minicart_service_postgres_data`.
+
+For a clean local reset, the following commands remove only the MiniCart PostgreSQL container and its explicitly named data volume. Do not substitute `docker compose down --volumes` if other Compose volumes may be present:
+
+```powershell
+docker compose stop postgres
+docker compose rm -f postgres
+docker volume rm minicart_service_postgres_data
+```
+
+Then create a fresh database container and initialize service-owned schemas:
 
 ```powershell
 docker compose up -d postgres
 docker compose ps
+docker compose exec postgres pg_isready -U minicart_admin -d minicart_auth_db
+.\.venv\Scripts\python.exe initialize_databases.py
 ```
 
-Stop the container without removing persistent data:
+Verify database names:
 
 ```powershell
-docker compose down
+docker compose exec postgres psql -U minicart_admin -d postgres -Atc "SELECT datname FROM pg_database WHERE datname IN ('minicart_auth_db','minicart_product_db','minicart_order_db','minicart_payment_db') ORDER BY datname"
 ```
 
-The database listens on local port `5432`; Compose stores its data in the `minicart_postgres_data` named volume. The Python database modules default to `DB_HOST=localhost` for local execution. When a service runs in a Compose network, configure `DB_HOST=postgres`. For an existing volume, the `DB_PASSWORD` must match the password already configured for the database role; changing `.env` alone does not reset that password.
+The database listens on local port `5432`. Local service processes connect through `DB_HOST=localhost`; a service container on the Compose network should use `DB_HOST=postgres`. Credentials (`DB_USER` and `DB_PASSWORD`) are shared for this development setup, but each service's SQLAlchemy URL selects only its own database. Stopping PostgreSQL without removing the volume preserves all four databases.
 
-The service tables can be created from each service directory after installing dependencies and configuring `.env`:
-
-```powershell
-python -c "from database import Base, engine; import models; Base.metadata.create_all(bind=engine)"
-```
-
-Run that command once from each of `product-service`, `order-service`, and `payment-service`. Use a service's `SessionLocal.begin()` context for transactional database work when business logic is added.
+The database initializer uses the root Python environment to import each service's model metadata in a separate process and create tables in the configured database. It does not create cross-service foreign keys or connect the API Gateway to PostgreSQL.
 
 ## gRPC code generation
 
@@ -429,10 +436,7 @@ The script also generates protobuf `.pyi` files so Pylance can resolve generated
 
 ## Setup verification
 
-- Dependency setup on Python `3.13.7`: all five isolated environments installed their own requirements, passed `python -m pip check`, and imported the generated modules needed by that project. The API Gateway suite passed all 13 tests.
-- Service and E2E integration test runs were attempted, but the Product (`50051`), Order (`50052`), and Payment (`50053`) servers were unavailable. Docker was also unavailable in this run, so PostgreSQL-backed service tests and Docker image builds could not be verified.
-- PostgreSQL started with Compose and reported healthy on local port `5432`.
-- SQLAlchemy connected from all three service configurations and created their owned tables.
+Run `docker compose ps` to check PostgreSQL health, `initialize_databases.py` to initialize and verify service-owned schemas, and the per-service tests described above when you choose to run them. The Auth Service uses `AUTH_DB_NAME`; Product, Order, and Payment use their respective `*_DB_NAME` settings.
 - The database contains `products`, `inventory`, `orders`, `order_items`, and `payments`.
 - gRPC code generation completed; all generated protobuf modules, service stubs, servicers, and RPC methods imported successfully.
 - A temporary persistence marker remained after restarting PostgreSQL; the marker table was removed after the check.

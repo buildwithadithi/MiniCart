@@ -17,7 +17,7 @@ database_url = URL.create(
     password=db_password,
     host=os.getenv("DB_HOST", "localhost"),
     port=int(os.getenv("DB_PORT", "5432")),
-    database=os.getenv("DB_NAME", "minicart"),
+    database=os.getenv("AUTH_DB_NAME", "minicart_auth_db"),
 )
 
 engine = create_engine(database_url, pool_pre_ping=True)

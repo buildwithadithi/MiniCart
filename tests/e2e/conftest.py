@@ -6,17 +6,21 @@ from uuid import uuid4
 
 import grpc
 import pytest
+from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ORDER_SERVICE_ROOT = PROJECT_ROOT / "order-service"
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(ORDER_SERVICE_ROOT))
+TESTS_ROOT = PROJECT_ROOT / "tests"
+for path in (str(PROJECT_ROOT), str(ORDER_SERVICE_ROOT), str(TESTS_ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
-from database import SessionLocal, engine
-from models import Order, OrderItem
+load_dotenv(PROJECT_ROOT / ".env")
+
+from database_connections import create_service_database_connections
 from generated import auth_pb2, auth_pb2_grpc
 from generated import order_pb2_grpc, payment_pb2_grpc, product_pb2_grpc
 from servicer import OrderServiceServicer
@@ -34,8 +38,23 @@ def _service_addresses() -> tuple[tuple[str, str], ...]:
     )
 
 
+@pytest.fixture(scope="session")
+def service_databases():
+    try:
+        connections = create_service_database_connections()
+    except (RuntimeError, ValueError) as error:
+        pytest.fail(
+            "MiniCart PostgreSQL configuration is unavailable: "
+            f"{error}",
+            pytrace=False,
+        )
+    yield connections
+    for service in connections.values():
+        service["engine"].dispose()
+
+
 @pytest.fixture(scope="session", autouse=True)
-def require_services_and_database():
+def require_services_and_database(service_databases):
     for service_name, address in _service_addresses():
         channel = grpc.insecure_channel(address)
         try:
@@ -50,8 +69,17 @@ def require_services_and_database():
         channel.close()
 
     try:
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
+        expected_tables = {
+            "auth": ("users",),
+            "product": ("products", "inventory"),
+            "order": ("orders", "order_items"),
+            "payment": ("payments",),
+        }
+        for service_name, tables in expected_tables.items():
+            with service_databases[service_name]["engine"].connect() as connection:
+                connection.execute(text("SELECT 1"))
+                for table in tables:
+                    connection.execute(text(f"SELECT * FROM {table} LIMIT 0"))
     except (SQLAlchemyError, RuntimeError) as error:
         pytest.fail(
             "MiniCart PostgreSQL is not reachable. Start it with "
@@ -70,7 +98,7 @@ def product_stub():
 
 
 @pytest.fixture(scope="session")
-def auth_token():
+def auth_token(service_databases):
     address = os.getenv("AUTH_SERVICE_ADDRESS", "127.0.0.1:50054")
     channel = grpc.insecure_channel(address)
     stub = auth_pb2_grpc.AuthServiceStub(channel)
@@ -94,7 +122,8 @@ def auth_token():
     finally:
         channel.close()
         if registration is not None:
-            with SessionLocal.begin() as session:
+            order_ids = []
+            with service_databases["order"]["sessions"].begin() as session:
                 order_ids = list(
                     session.execute(
                         text("SELECT id FROM orders WHERE user_id = :user_id"),
@@ -103,10 +132,6 @@ def auth_token():
                 )
                 if order_ids:
                     session.execute(
-                        text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
-                        {"order_ids": order_ids},
-                    )
-                    session.execute(
                         text("DELETE FROM order_items WHERE order_id = ANY(:order_ids)"),
                         {"order_ids": order_ids},
                     )
@@ -114,6 +139,13 @@ def auth_token():
                         text("DELETE FROM orders WHERE id = ANY(:order_ids)"),
                         {"order_ids": order_ids},
                     )
+            if order_ids:
+                with service_databases["payment"]["sessions"].begin() as session:
+                    session.execute(
+                        text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
+                        {"order_ids": order_ids},
+                    )
+            with service_databases["auth"]["sessions"].begin() as session:
                 session.execute(
                     text("DELETE FROM users WHERE id = :user_id"),
                     {"user_id": registration.user_id},
@@ -149,25 +181,29 @@ def payment_stub():
 
 
 @pytest.fixture
-def created_records():
+def created_records(service_databases):
     records = {"order_ids": [], "product_ids": []}
     yield records
 
     order_ids = records["order_ids"]
     product_ids = records["product_ids"]
-    with SessionLocal.begin() as session:
-        if order_ids:
+    if order_ids:
+        with service_databases["payment"]["sessions"].begin() as session:
             session.execute(
                 text("DELETE FROM payments WHERE order_id = ANY(:order_ids)"),
                 {"order_ids": order_ids},
             )
-            session.query(OrderItem).filter(
-                OrderItem.order_id.in_(order_ids)
-            ).delete(synchronize_session=False)
-            session.query(Order).filter(Order.id.in_(order_ids)).delete(
-                synchronize_session=False
+        with service_databases["order"]["sessions"].begin() as session:
+            session.execute(
+                text("DELETE FROM order_items WHERE order_id = ANY(:order_ids)"),
+                {"order_ids": order_ids},
             )
-        if product_ids:
+            session.execute(
+                text("DELETE FROM orders WHERE id = ANY(:order_ids)"),
+                {"order_ids": order_ids},
+            )
+    if product_ids:
+        with service_databases["product"]["sessions"].begin() as session:
             session.execute(
                 text("DELETE FROM inventory WHERE product_id = ANY(:product_ids)"),
                 {"product_ids": product_ids},

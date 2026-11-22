@@ -2,13 +2,17 @@ services:
   postgres:
     image: postgres:17
     environment:
-      POSTGRES_DB: ${DB_NAME:-minicart}
+      POSTGRES_DB: ${AUTH_DB_NAME:-minicart_auth_db}
       POSTGRES_USER: ${DB_USER:-minicart_admin}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in your environment or .env file}
+      MINICART_PRODUCT_DB: ${PRODUCT_DB_NAME:-minicart_product_db}
+      MINICART_ORDER_DB: ${ORDER_DB_NAME:-minicart_order_db}
+      MINICART_PAYMENT_DB: ${PAYMENT_DB_NAME:-minicart_payment_db}
     ports:
       - "5432:5432"
     volumes:
-      - minicart_postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init-databases.sql:/docker-entrypoint-initdb.d/10-create-service-databases.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -17,4 +21,5 @@ services:
       start_period: 5s
 
 volumes:
-  minicart_postgres_data:
+  postgres_data:
+    name: minicart_service_postgres_data
