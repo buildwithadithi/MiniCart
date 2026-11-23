@@ -33,10 +33,14 @@ class OrderServiceClient:
         metadata = (("authorization", f"Bearer {authorization_token}"),)
         if idempotency_key is not None:
             metadata += (("idempotency-key", idempotency_key),)
-        return self._stub.CreateOrder(
-            request,
-            timeout=self.timeout,
-            metadata=metadata,
+        return retry_grpc_call(
+            lambda timeout_seconds: self._stub.CreateOrder(
+                request,
+                timeout=timeout_seconds,
+                metadata=metadata,
+            ),
+            rpc_name="OrderService.CreateOrder",
+            timeout_seconds=self.timeout,
         )
 
     def get_order(

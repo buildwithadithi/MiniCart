@@ -177,6 +177,20 @@ def test_invalid_order_id_is_rejected(client, order_client):
     assert order_client.requested_order_id is None
 
 
+def test_missing_idempotency_key_is_rejected(order_client, token_verifier, access_token):
+    with TestClient(
+        create_app(order_client, token_verifier=token_verifier)
+    ) as test_client:
+        test_client.headers["Authorization"] = f"Bearer {access_token}"
+        response = test_client.post(
+            "/orders",
+            json={"items": [{"product_id": 12, "quantity": 2}]},
+        )
+
+    assert response.status_code == 422
+    assert order_client.create_request is None
+
+
 def test_openapi_and_swagger_ui_are_available(client):
     openapi_response = client.get("/openapi.json")
     docs_response = client.get("/docs")
