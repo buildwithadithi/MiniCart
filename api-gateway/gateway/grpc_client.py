@@ -5,6 +5,10 @@ import grpc
 from dotenv import load_dotenv
 
 from generated import order_pb2, order_pb2_grpc
+from generated.circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+)
 from generated.grpc_retry import retry_grpc_call
 
 
@@ -20,6 +24,10 @@ class OrderServiceClient:
         self.timeout = float(os.getenv("ORDER_SERVICE_TIMEOUT_SECONDS", "3"))
         if self.timeout <= 0:
             raise ValueError("ORDER_SERVICE_TIMEOUT_SECONDS must be positive.")
+        self._circuit_breaker = CircuitBreaker(
+            CircuitBreakerConfig.from_environment("GATEWAY_ORDER_CB"),
+            name="gateway-to-order",
+        )
 
         self._channel = grpc.insecure_channel(self.address)
         self._stub = order_pb2_grpc.OrderServiceStub(self._channel)
@@ -33,27 +41,33 @@ class OrderServiceClient:
         metadata = (("authorization", f"Bearer {authorization_token}"),)
         if idempotency_key is not None:
             metadata += (("idempotency-key", idempotency_key),)
-        return retry_grpc_call(
-            lambda timeout_seconds: self._stub.CreateOrder(
-                request,
-                timeout=timeout_seconds,
-                metadata=metadata,
-            ),
-            rpc_name="OrderService.CreateOrder",
-            timeout_seconds=self.timeout,
+        return self._circuit_breaker.execute(
+            lambda: retry_grpc_call(
+                lambda timeout_seconds: self._stub.CreateOrder(
+                    request,
+                    timeout=timeout_seconds,
+                    metadata=metadata,
+                ),
+                rpc_name="OrderService.CreateOrder",
+                timeout_seconds=self.timeout,
+                before_retry=self._circuit_breaker.is_retry_allowed,
+            )
         )
 
     def get_order(
         self, order_id: int, authorization_token: str
     ) -> order_pb2.GetOrderResponse:
-        return retry_grpc_call(
-            lambda timeout_seconds: self._stub.GetOrder(
-                order_pb2.GetOrderRequest(order_id=order_id),
-                timeout=timeout_seconds,
-                metadata=(("authorization", f"Bearer {authorization_token}"),),
-            ),
-            rpc_name="OrderService.GetOrder",
-            timeout_seconds=self.timeout,
+        return self._circuit_breaker.execute(
+            lambda: retry_grpc_call(
+                lambda timeout_seconds: self._stub.GetOrder(
+                    order_pb2.GetOrderRequest(order_id=order_id),
+                    timeout=timeout_seconds,
+                    metadata=(("authorization", f"Bearer {authorization_token}"),),
+                ),
+                rpc_name="OrderService.GetOrder",
+                timeout_seconds=self.timeout,
+                before_retry=self._circuit_breaker.is_retry_allowed,
+            )
         )
 
     def close(self) -> None:

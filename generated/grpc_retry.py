@@ -8,6 +8,8 @@ from typing import TypeVar
 
 import grpc
 
+from generated.circuit_breaker import CircuitBreakerOpenError
+
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
@@ -111,6 +113,7 @@ def retry_grpc_call(
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     uniform: Callable[[float, float], float] = random.uniform,
+    before_retry: Callable[[], bool] | None = None,
 ) -> _T:
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive.")
@@ -124,6 +127,12 @@ def retry_grpc_call(
     last_error: grpc.RpcError | None = None
 
     for attempt in range(1, retry_policy.max_attempts + 1):
+        if before_retry is not None and not before_retry():
+            logger.info(
+                "gRPC retry stopped because circuit breaker opened",
+                extra={"rpc": rpc_name, "attempt": attempt},
+            )
+            raise CircuitBreakerOpenError()
         remaining = overall_deadline - clock()
         if remaining <= 0:
             if last_error is not None:
@@ -190,6 +199,12 @@ def retry_grpc_call(
                     "remaining_seconds": round(remaining, 3),
                 },
             )
+            if before_retry is not None and not before_retry():
+                logger.info(
+                    "gRPC retry stopped because circuit breaker opened",
+                    extra={"rpc": rpc_name, "attempt": attempt},
+                )
+                raise CircuitBreakerOpenError()
             sleep(delay)
 
     raise AssertionError("retry loop exhausted without propagating a gRPC error")
