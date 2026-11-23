@@ -5,6 +5,7 @@ import grpc
 from dotenv import load_dotenv
 
 from generated import order_pb2, order_pb2_grpc
+from generated.grpc_retry import retry_grpc_call
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -35,10 +36,14 @@ class OrderServiceClient:
     def get_order(
         self, order_id: int, authorization_token: str
     ) -> order_pb2.GetOrderResponse:
-        return self._stub.GetOrder(
-            order_pb2.GetOrderRequest(order_id=order_id),
-            timeout=self.timeout,
-            metadata=(("authorization", f"Bearer {authorization_token}"),),
+        return retry_grpc_call(
+            lambda timeout_seconds: self._stub.GetOrder(
+                order_pb2.GetOrderRequest(order_id=order_id),
+                timeout=timeout_seconds,
+                metadata=(("authorization", f"Bearer {authorization_token}"),),
+            ),
+            rpc_name="OrderService.GetOrder",
+            timeout_seconds=self.timeout,
         )
 
     def close(self) -> None:

@@ -183,6 +183,16 @@ REST endpoints:
 
 The Gateway verifies the JWT before forwarding the exact Bearer token as gRPC metadata. The Order Service verifies that token again and derives the owner from `sub`; it does not trust a request field or identity header. Orders belonging to another user are returned as `NOT_FOUND` to avoid disclosing their existence.
 
+Read-only gRPC calls use bounded retries with exponential backoff:
+
+- `GRPC_RETRY_MAX_ATTEMPTS=4` for 1 initial attempt and 3 retries
+- `GRPC_RETRY_INITIAL_DELAY_SECONDS=0.2`
+- `GRPC_RETRY_MULTIPLIER=2`
+- `GRPC_RETRY_MAX_DELAY_SECONDS=1.0`
+- `GRPC_RETRY_JITTER_RATIO=0.25`
+
+Retries apply only to `ProductService.GetProduct`, `ProductService.CheckStock`, and `OrderService.GetOrder`. They retry only `UNAVAILABLE` and `DEADLINE_EXCEEDED` when enough of the existing RPC deadline remains. Mutating and authentication RPCs are not retried.
+
 Open Swagger UI at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs). The OpenAPI schema is at [http://127.0.0.1:8000/openapi.json](http://127.0.0.1:8000/openapi.json).
 
 Run the Gateway tests from the project root:

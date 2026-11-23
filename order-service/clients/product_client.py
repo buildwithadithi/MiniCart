@@ -3,6 +3,7 @@ import os
 import grpc
 
 from generated import product_pb2, product_pb2_grpc
+from generated.grpc_retry import retry_grpc_call
 
 
 class ProductClient:
@@ -12,20 +13,30 @@ class ProductClient:
             f"localhost:{os.getenv('PRODUCT_SERVICE_PORT', '50051')}",
         )
         self.timeout = float(os.getenv("PRODUCT_SERVICE_TIMEOUT_SECONDS", "3"))
+        if self.timeout <= 0:
+            raise ValueError("PRODUCT_SERVICE_TIMEOUT_SECONDS must be positive.")
         self._channel = grpc.insecure_channel(self.address)
         self._stub = product_pb2_grpc.ProductServiceStub(self._channel)
 
     def get_product(self, product_id: int) -> product_pb2.Product:
-        response = self._stub.GetProduct(
-            product_pb2.GetProductRequest(product_id=product_id),
-            timeout=self.timeout,
+        response = retry_grpc_call(
+            lambda timeout_seconds: self._stub.GetProduct(
+                product_pb2.GetProductRequest(product_id=product_id),
+                timeout=timeout_seconds,
+            ),
+            rpc_name="ProductService.GetProduct",
+            timeout_seconds=self.timeout,
         )
         return response.product
 
     def check_stock(self, product_id: int) -> product_pb2.CheckStockResponse:
-        return self._stub.CheckStock(
-            product_pb2.CheckStockRequest(product_id=product_id),
-            timeout=self.timeout,
+        return retry_grpc_call(
+            lambda timeout_seconds: self._stub.CheckStock(
+                product_pb2.CheckStockRequest(product_id=product_id),
+                timeout=timeout_seconds,
+            ),
+            rpc_name="ProductService.CheckStock",
+            timeout_seconds=self.timeout,
         )
 
     def update_stock(self, product_id: int, quantity_delta: int) -> int:
