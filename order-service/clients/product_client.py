@@ -46,13 +46,19 @@ class ProductClient:
         quantity_delta: int,
         operation_id: str | None = None,
     ) -> int:
-        response = self._stub.UpdateStock(
-            product_pb2.UpdateStockRequest(
-                product_id=product_id,
-                quantity_delta=quantity_delta,
-                operation_id=operation_id or str(uuid.uuid4()),
+        stable_operation_id = operation_id or str(uuid.uuid4())
+        request = product_pb2.UpdateStockRequest(
+            product_id=product_id,
+            quantity_delta=quantity_delta,
+            operation_id=stable_operation_id,
+        )
+        response = retry_grpc_call(
+            lambda timeout_seconds: self._stub.UpdateStock(
+                request,
+                timeout=timeout_seconds,
             ),
-            timeout=self.timeout,
+            rpc_name="ProductService.UpdateStock",
+            timeout_seconds=self.timeout,
         )
         return response.available_stock
 

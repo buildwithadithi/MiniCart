@@ -417,3 +417,169 @@ def test_real_in_process_grpc_channel_retries_product_read(monkeypatch, rpc_name
     finally:
         server.stop(grace=0).wait()
 
+
+@pytest.mark.parametrize("status", [
+    grpc.StatusCode.UNAVAILABLE,
+    grpc.StatusCode.DEADLINE_EXCEEDED,
+])
+def test_update_stock_mutation_retries_same_request(monkeypatch, status):
+    class FakeChannel:
+        def close(self):
+            pass
+
+    class FakeStub:
+        def __init__(self):
+            self.calls = []
+
+        def UpdateStock(self, request, timeout):
+            self.calls.append((request, timeout))
+            if len(self.calls) == 1:
+                raise FakeRpcError(status)
+            return product_pb2.UpdateStockResponse(available_stock=7)
+
+    stub = FakeStub()
+    monkeypatch.setenv("PRODUCT_SERVICE_TIMEOUT_SECONDS", "2")
+    monkeypatch.setenv("GRPC_RETRY_INITIAL_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRPC_RETRY_MAX_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRPC_RETRY_JITTER_RATIO", "0")
+    monkeypatch.setattr(
+        product_pb2_grpc,
+        "ProductServiceStub",
+        lambda channel: stub,
+    )
+    monkeypatch.setattr(
+        __import__("clients.product_client", fromlist=["grpc"]).grpc,
+        "insecure_channel",
+        lambda address: FakeChannel(),
+    )
+
+    client = ProductClient(address="fake:50051")
+    operation_id = "stock-op-101"
+    response = client.update_stock(42, -3, operation_id=operation_id)
+
+    assert response == 7
+    assert len(stub.calls) == 2
+    for request, _timeout in stub.calls:
+        assert request.product_id == 42
+        assert request.quantity_delta == -3
+        assert request.operation_id == operation_id
+
+
+def test_update_stock_retry_exhaustion_uses_four_attempts(monkeypatch):
+    class FakeChannel:
+        def close(self):
+            pass
+
+    class FakeStub:
+        def __init__(self):
+            self.calls = []
+
+        def UpdateStock(self, request, timeout):
+            self.calls.append((request, timeout))
+            raise FakeRpcError(grpc.StatusCode.UNAVAILABLE)
+
+    stub = FakeStub()
+    monkeypatch.setenv("PRODUCT_SERVICE_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("GRPC_RETRY_INITIAL_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRPC_RETRY_MAX_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRPC_RETRY_JITTER_RATIO", "0")
+    monkeypatch.setattr(
+        product_pb2_grpc,
+        "ProductServiceStub",
+        lambda channel: stub,
+    )
+    monkeypatch.setattr(
+        __import__("clients.product_client", fromlist=["grpc"]).grpc,
+        "insecure_channel",
+        lambda address: FakeChannel(),
+    )
+
+    client = ProductClient(address="fake:50051")
+    operation_id = "stock-op-exhaustion"
+    with pytest.raises(FakeRpcError) as raised:
+        client.update_stock(42, -3, operation_id=operation_id)
+
+    assert raised.value.code() == grpc.StatusCode.UNAVAILABLE
+    assert len(stub.calls) == 4
+    assert {request.operation_id for request, _ in stub.calls} == {operation_id}
+    assert {request.product_id for request, _ in stub.calls} == {42}
+    assert {request.quantity_delta for request, _ in stub.calls} == {-3}
+
+
+def test_update_stock_non_retryable_error_stops_after_one_attempt(monkeypatch):
+    class FakeChannel:
+        def close(self):
+            pass
+
+    class FakeStub:
+        def __init__(self):
+            self.calls = 0
+
+        def UpdateStock(self, request, timeout):
+            self.calls += 1
+            raise FakeRpcError(grpc.StatusCode.INVALID_ARGUMENT)
+
+    stub = FakeStub()
+    monkeypatch.setenv("PRODUCT_SERVICE_TIMEOUT_SECONDS", "2")
+    monkeypatch.setenv("GRPC_RETRY_INITIAL_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRPC_RETRY_MAX_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRPC_RETRY_JITTER_RATIO", "0")
+    monkeypatch.setattr(
+        product_pb2_grpc,
+        "ProductServiceStub",
+        lambda channel: stub,
+    )
+    monkeypatch.setattr(
+        __import__("clients.product_client", fromlist=["grpc"]).grpc,
+        "insecure_channel",
+        lambda address: FakeChannel(),
+    )
+
+    client = ProductClient(address="fake:50051")
+    with pytest.raises(FakeRpcError) as raised:
+        client.update_stock(42, -3, operation_id="stock-op-permanent")
+
+    assert raised.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert stub.calls == 1
+
+
+def test_compensation_update_retry_reuses_stable_operation_id(monkeypatch):
+    class FakeChannel:
+        def close(self):
+            pass
+
+    class FakeStub:
+        def __init__(self):
+            self.calls = []
+
+        def UpdateStock(self, request, timeout):
+            self.calls.append((request, timeout))
+            if len(self.calls) == 1:
+                raise FakeRpcError(grpc.StatusCode.UNAVAILABLE)
+            return product_pb2.UpdateStockResponse(available_stock=6)
+
+    stub = FakeStub()
+    monkeypatch.setenv("PRODUCT_SERVICE_TIMEOUT_SECONDS", "2")
+    monkeypatch.setenv("GRPC_RETRY_INITIAL_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRPC_RETRY_MAX_DELAY_SECONDS", "0")
+    monkeypatch.setenv("GRPC_RETRY_JITTER_RATIO", "0")
+    monkeypatch.setattr(
+        product_pb2_grpc,
+        "ProductServiceStub",
+        lambda channel: stub,
+    )
+    monkeypatch.setattr(
+        __import__("clients.product_client", fromlist=["grpc"]).grpc,
+        "insecure_channel",
+        lambda address: FakeChannel(),
+    )
+
+    client = ProductClient(address="fake:50051")
+    operation_id = "compensation-op-101"
+    response = client.update_stock(42, 1, operation_id=operation_id)
+
+    assert response == 6
+    assert len(stub.calls) == 2
+    assert {request.operation_id for request, _ in stub.calls} == {operation_id}
+    assert {request.quantity_delta for request, _ in stub.calls} == {1}
+
