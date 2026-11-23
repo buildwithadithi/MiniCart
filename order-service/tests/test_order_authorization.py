@@ -1,4 +1,5 @@
 import time
+from collections import namedtuple
 
 import grpc
 import jwt
@@ -34,6 +35,9 @@ class FakeContext:
         raise RpcAbort(code, details)
 
 
+MetadataEntry = namedtuple("MetadataEntry", ("key", "value"))
+
+
 class FakeProductClient:
     def get_product(self, product_id: int, /):
         return product_pb2.Product(
@@ -48,7 +52,12 @@ class FakeProductClient:
             available_stock=5,
         )
 
-    def update_stock(self, _product_id: int, quantity_delta: int, /):
+    def update_stock(
+        self,
+        _product_id: int,
+        quantity_delta: int,
+        operation_id: str | None = None,
+    ):
         return 5 + quantity_delta
 
     def close(self):
@@ -110,7 +119,10 @@ def order_test_environment(monkeypatch):
 
 
 def _metadata(token, *extra):
-    return (("authorization", f"Bearer {token}"), *extra)
+    return (
+        MetadataEntry("authorization", f"Bearer {token}"),
+        *(MetadataEntry(*entry) for entry in extra),
+    )
 
 
 def test_create_order_uses_verified_subject_not_identity_metadata(
@@ -141,7 +153,12 @@ def test_inventory_failure_restores_prior_updates_and_fails_order(
             self.stock = {7: 5, 8: 5}
             self.updates = []
 
-        def update_stock(self, product_id: int, quantity_delta: int, /):
+        def update_stock(
+            self,
+            product_id: int,
+            quantity_delta: int,
+            operation_id: str | None = None,
+        ):
             self.updates.append((product_id, quantity_delta))
             if product_id == 8 and quantity_delta < 0:
                 raise StockUpdateUnavailable()

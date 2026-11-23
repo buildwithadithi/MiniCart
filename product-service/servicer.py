@@ -1,13 +1,16 @@
 import logging
+import hashlib
+import json
+import uuid
 from decimal import Decimal, InvalidOperation
 
 import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from database import SessionLocal
-from models import Inventory, Product
+from models import Inventory, ProcessedStockOperation, Product
 from generated import product_pb2, product_pb2_grpc
 
 
@@ -145,37 +148,105 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
         if request.product_id <= 0:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Product ID must be positive.")
 
+        operation_id = request.operation_id.strip() or str(uuid.uuid4())
+        request_payload = json.dumps(
+            {
+                "product_id": request.product_id,
+                "quantity_delta": request.quantity_delta,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        request_payload_hash = hashlib.sha256(
+            request_payload.encode("utf-8")
+        ).hexdigest()
+        response = None
+        failure = None
+
         try:
             with SessionLocal.begin() as session:
-                inventory = session.scalar(
-                    select(Inventory)
-                    .where(Inventory.product_id == request.product_id)
+                processed = session.scalar(
+                    select(ProcessedStockOperation)
+                    .where(ProcessedStockOperation.operation_id == operation_id)
                     .with_for_update()
                 )
-                if inventory is None:
-                    response = None
-                    failure = (grpc.StatusCode.NOT_FOUND, "Product was not found.")
-                else:
-                    updated_stock = inventory.available_stock + request.quantity_delta
-                    if updated_stock < 0:
-                        response = None
+                if processed is not None:
+                    if processed.request_payload_hash != request_payload_hash:
                         failure = (
-                            grpc.StatusCode.FAILED_PRECONDITION,
-                            "Stock cannot be negative.",
-                        )
-                    elif updated_stock > _MAX_STOCK:
-                        response = None
-                        failure = (
-                            grpc.StatusCode.INVALID_ARGUMENT,
-                            "Stock exceeds the supported maximum.",
+                            grpc.StatusCode.ALREADY_EXISTS,
+                            "Operation ID was already used with different stock data.",
                         )
                     else:
-                        inventory.available_stock = updated_stock
-                        session.flush()
                         response = product_pb2.UpdateStockResponse(
-                            available_stock=updated_stock
+                            available_stock=processed.available_stock
                         )
-                        failure = None
+                else:
+                    inventory = session.scalar(
+                        select(Inventory)
+                        .where(Inventory.product_id == request.product_id)
+                        .with_for_update()
+                    )
+                    if inventory is None:
+                        failure = (
+                            grpc.StatusCode.NOT_FOUND,
+                            "Product was not found.",
+                        )
+                    else:
+                        updated_stock = inventory.available_stock + request.quantity_delta
+                        if updated_stock < 0:
+                            failure = (
+                                grpc.StatusCode.FAILED_PRECONDITION,
+                                "Stock cannot be negative.",
+                            )
+                        elif updated_stock > _MAX_STOCK:
+                            failure = (
+                                grpc.StatusCode.INVALID_ARGUMENT,
+                                "Stock exceeds the supported maximum.",
+                            )
+                        else:
+                            inventory.available_stock = updated_stock
+                            session.add(
+                                ProcessedStockOperation(
+                                    operation_id=operation_id,
+                                    operation_type="stock_adjustment",
+                                    product_id=request.product_id,
+                                    quantity_delta=request.quantity_delta,
+                                    request_payload_hash=request_payload_hash,
+                                    available_stock=updated_stock,
+                                )
+                            )
+                            session.flush()
+                            response = product_pb2.UpdateStockResponse(
+                                available_stock=updated_stock
+                            )
+        except IntegrityError:
+            try:
+                with SessionLocal.begin() as session:
+                    processed = session.scalar(
+                        select(ProcessedStockOperation).where(
+                            ProcessedStockOperation.operation_id == operation_id
+                        )
+                    )
+                    if processed is None:
+                        failure = (
+                            grpc.StatusCode.INTERNAL,
+                            "Unable to resolve duplicate stock operation.",
+                        )
+                    elif processed.request_payload_hash != request_payload_hash:
+                        failure = (
+                            grpc.StatusCode.ALREADY_EXISTS,
+                            "Operation ID was already used with different stock data.",
+                        )
+                    else:
+                        response = product_pb2.UpdateStockResponse(
+                            available_stock=processed.available_stock
+                        )
+            except SQLAlchemyError:
+                logger.exception("Database failure resolving duplicate stock operation.")
+                context.abort(
+                    grpc.StatusCode.UNAVAILABLE,
+                    "The product database is temporarily unavailable.",
+                )
         except SQLAlchemyError:
             logger.exception("Database failure while updating product stock.")
             context.abort(

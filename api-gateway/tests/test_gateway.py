@@ -45,15 +45,20 @@ class FakeOrderClient:
         self.create_request = None
         self.requested_order_id = None
         self.authorization_token = None
+        self.idempotency_key = None
         self.create_error = None
         self.get_error = None
         self.order = _order_message()
 
     def create_order(
-        self, request: order_pb2.CreateOrderRequest, authorization_token: str
+        self,
+        request: order_pb2.CreateOrderRequest,
+        authorization_token: str,
+        idempotency_key: str | None = None,
     ):
         self.create_request = request
         self.authorization_token = authorization_token
+        self.idempotency_key = idempotency_key
         if self.create_error is not None:
             raise self.create_error
         return order_pb2.CreateOrderResponse(order=self.order)
@@ -80,6 +85,7 @@ def client(order_client, token_verifier, access_token):
         create_app(order_client, token_verifier=token_verifier)
     ) as test_client:
         test_client.headers["Authorization"] = f"Bearer {access_token}"
+        test_client.headers["Idempotency-Key"] = "gateway-test-key"
         yield test_client
 
 

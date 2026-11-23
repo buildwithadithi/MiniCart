@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rproduct.proto\x12\x13minicart.product.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"w\n\x07Product\x12\n\n\x02id\x18\x01 \x01(\x03\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x03 \x01(\t\x12\r\n\x05price\x18\x04 \x01(\t\x12.\n\ncreated_at\x18\x05 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\"\\\n\x11\x41\x64\x64ProductRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x02 \x01(\t\x12\r\n\x05price\x18\x03 \x01(\t\x12\x15\n\rinitial_stock\x18\x04 \x01(\x05\"C\n\x12\x41\x64\x64ProductResponse\x12-\n\x07product\x18\x01 \x01(\x0b\x32\x1c.minicart.product.v1.Product\"\'\n\x11GetProductRequest\x12\x12\n\nproduct_id\x18\x01 \x01(\x03\"C\n\x12GetProductResponse\x12-\n\x07product\x18\x01 \x01(\x0b\x32\x1c.minicart.product.v1.Product\"\'\n\x11\x43heckStockRequest\x12\x12\n\nproduct_id\x18\x01 \x01(\x03\"E\n\x12\x43heckStockResponse\x12\x16\n\x0eproduct_exists\x18\x01 \x01(\x08\x12\x17\n\x0f\x61vailable_stock\x18\x02 \x01(\x05\"@\n\x12UpdateStockRequest\x12\x12\n\nproduct_id\x18\x01 \x01(\x03\x12\x16\n\x0equantity_delta\x18\x02 \x01(\x05\".\n\x13UpdateStockResponse\x12\x17\n\x0f\x61vailable_stock\x18\x01 \x01(\x05\x32\x8f\x03\n\x0eProductService\x12]\n\nAddProduct\x12&.minicart.product.v1.AddProductRequest\x1a\'.minicart.product.v1.AddProductResponse\x12]\n\nGetProduct\x12&.minicart.product.v1.GetProductRequest\x1a\'.minicart.product.v1.GetProductResponse\x12]\n\nCheckStock\x12&.minicart.product.v1.CheckStockRequest\x1a\'.minicart.product.v1.CheckStockResponse\x12`\n\x0bUpdateStock\x12\'.minicart.product.v1.UpdateStockRequest\x1a(.minicart.product.v1.UpdateStockResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rproduct.proto\x12\x13minicart.product.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"w\n\x07Product\x12\n\n\x02id\x18\x01 \x01(\x03\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x03 \x01(\t\x12\r\n\x05price\x18\x04 \x01(\t\x12.\n\ncreated_at\x18\x05 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\"\\\n\x11\x41\x64\x64ProductRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x02 \x01(\t\x12\r\n\x05price\x18\x03 \x01(\t\x12\x15\n\rinitial_stock\x18\x04 \x01(\x05\"C\n\x12\x41\x64\x64ProductResponse\x12-\n\x07product\x18\x01 \x01(\x0b\x32\x1c.minicart.product.v1.Product\"\'\n\x11GetProductRequest\x12\x12\n\nproduct_id\x18\x01 \x01(\x03\"C\n\x12GetProductResponse\x12-\n\x07product\x18\x01 \x01(\x0b\x32\x1c.minicart.product.v1.Product\"\'\n\x11\x43heckStockRequest\x12\x12\n\nproduct_id\x18\x01 \x01(\x03\"E\n\x12\x43heckStockResponse\x12\x16\n\x0eproduct_exists\x18\x01 \x01(\x08\x12\x17\n\x0f\x61vailable_stock\x18\x02 \x01(\x05\"V\n\x12UpdateStockRequest\x12\x12\n\nproduct_id\x18\x01 \x01(\x03\x12\x16\n\x0equantity_delta\x18\x02 \x01(\x05\x12\x14\n\x0coperation_id\x18\x03 \x01(\t\".\n\x13UpdateStockResponse\x12\x17\n\x0f\x61vailable_stock\x18\x01 \x01(\x05\x32\x8f\x03\n\x0eProductService\x12]\n\nAddProduct\x12&.minicart.product.v1.AddProductRequest\x1a\'.minicart.product.v1.AddProductResponse\x12]\n\nGetProduct\x12&.minicart.product.v1.GetProductRequest\x1a\'.minicart.product.v1.GetProductResponse\x12]\n\nCheckStock\x12&.minicart.product.v1.CheckStockRequest\x1a\'.minicart.product.v1.CheckStockResponse\x12`\n\x0bUpdateStock\x12\'.minicart.product.v1.UpdateStockRequest\x1a(.minicart.product.v1.UpdateStockResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -47,9 +47,9 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CHECKSTOCKRESPONSE']._serialized_start=506
   _globals['_CHECKSTOCKRESPONSE']._serialized_end=575
   _globals['_UPDATESTOCKREQUEST']._serialized_start=577
-  _globals['_UPDATESTOCKREQUEST']._serialized_end=641
-  _globals['_UPDATESTOCKRESPONSE']._serialized_start=643
-  _globals['_UPDATESTOCKRESPONSE']._serialized_end=689
-  _globals['_PRODUCTSERVICE']._serialized_start=692
-  _globals['_PRODUCTSERVICE']._serialized_end=1091
+  _globals['_UPDATESTOCKREQUEST']._serialized_end=663
+  _globals['_UPDATESTOCKRESPONSE']._serialized_start=665
+  _globals['_UPDATESTOCKRESPONSE']._serialized_end=711
+  _globals['_PRODUCTSERVICE']._serialized_start=714
+  _globals['_PRODUCTSERVICE']._serialized_end=1113
 # @@protoc_insertion_point(module_scope)

@@ -47,3 +47,4 @@ Start-Process powershell.exe -WorkingDirectory $projectRoot -ArgumentList @(
 )
 
 Write-Host "MiniCart services launched!" -ForegroundColor Green
+# .\start-minicart.ps1

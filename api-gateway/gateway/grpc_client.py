@@ -25,12 +25,18 @@ class OrderServiceClient:
         self._stub = order_pb2_grpc.OrderServiceStub(self._channel)
 
     def create_order(
-        self, request: order_pb2.CreateOrderRequest, authorization_token: str
+        self,
+        request: order_pb2.CreateOrderRequest,
+        authorization_token: str,
+        idempotency_key: str | None = None,
     ) -> order_pb2.CreateOrderResponse:
+        metadata = (("authorization", f"Bearer {authorization_token}"),)
+        if idempotency_key is not None:
+            metadata += (("idempotency-key", idempotency_key),)
         return self._stub.CreateOrder(
             request,
             timeout=self.timeout,
-            metadata=(("authorization", f"Bearer {authorization_token}"),),
+            metadata=metadata,
         )
 
     def get_order(

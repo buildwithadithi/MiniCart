@@ -67,12 +67,14 @@ class CheckStockResponse(_message.Message):
     def __init__(self, product_exists: _Optional[bool] = ..., available_stock: _Optional[int] = ...) -> None: ...
 
 class UpdateStockRequest(_message.Message):
-    __slots__ = ("product_id", "quantity_delta")
+    __slots__ = ("product_id", "quantity_delta", "operation_id")
     PRODUCT_ID_FIELD_NUMBER: _ClassVar[int]
     QUANTITY_DELTA_FIELD_NUMBER: _ClassVar[int]
+    OPERATION_ID_FIELD_NUMBER: _ClassVar[int]
     product_id: int
     quantity_delta: int
-    def __init__(self, product_id: _Optional[int] = ..., quantity_delta: _Optional[int] = ...) -> None: ...
+    operation_id: str
+    def __init__(self, product_id: _Optional[int] = ..., quantity_delta: _Optional[int] = ..., operation_id: _Optional[str] = ...) -> None: ...
 
 class UpdateStockResponse(_message.Message):
     __slots__ = ("available_stock",)

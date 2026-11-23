@@ -1,4 +1,5 @@
 import os
+import uuid
 
 import grpc
 
@@ -39,11 +40,17 @@ class ProductClient:
             timeout_seconds=self.timeout,
         )
 
-    def update_stock(self, product_id: int, quantity_delta: int) -> int:
+    def update_stock(
+        self,
+        product_id: int,
+        quantity_delta: int,
+        operation_id: str | None = None,
+    ) -> int:
         response = self._stub.UpdateStock(
             product_pb2.UpdateStockRequest(
                 product_id=product_id,
                 quantity_delta=quantity_delta,
+                operation_id=operation_id or str(uuid.uuid4()),
             ),
             timeout=self.timeout,
         )

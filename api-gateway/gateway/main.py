@@ -1,11 +1,12 @@
 import logging
+import re
 from contextlib import asynccontextmanager
 from datetime import timezone
 from typing import Callable, Protocol, TypeVar
 
 import grpc
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Path, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from generated import auth_pb2
@@ -29,11 +30,15 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 _MAX_PATH_ORDER_ID = 9223372036854775807
 _bearer_scheme = HTTPBearer(auto_error=False)
+_IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 class OrderClientProtocol(Protocol):
     def create_order(
-        self, request: order_pb2.CreateOrderRequest, authorization_token: str
+        self,
+        request: order_pb2.CreateOrderRequest,
+        authorization_token: str,
+        idempotency_key: str | None = None,
     ) -> order_pb2.CreateOrderResponse: ...
 
     def get_order(
@@ -320,7 +325,13 @@ def create_app(
         body: CreateOrderRequest,
         request: Request,
         principal: VerifiedBearer = Depends(_authenticated_bearer),
+        idempotency_key: str = Header(alias="Idempotency-Key"),
     ) -> OrderResponse:
+        if not _IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Idempotency-Key must be 1-128 characters using letters, digits, '.', '_' or '-'.",
+            )
         protobuf_request = order_pb2.CreateOrderRequest(
             items=[
                 order_pb2.OrderItemInput(
@@ -333,7 +344,9 @@ def create_app(
         return _call_order_service(
             lambda: _order_response(
                 request.app.state.order_client.create_order(
-                    protobuf_request, principal.token
+                    protobuf_request,
+                    principal.token,
+                    idempotency_key,
                 ).order
             )
         )

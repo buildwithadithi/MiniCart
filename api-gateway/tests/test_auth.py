@@ -43,7 +43,7 @@ class FakeOrderClient:
         self.authorization_token = None
         self.request = None
 
-    def create_order(self, request, authorization_token):
+    def create_order(self, request, authorization_token, idempotency_key=None):
         self.request = request
         self.authorization_token = authorization_token
         created_at = Timestamp()
@@ -167,6 +167,7 @@ def test_verified_bearer_is_forwarded_without_trusting_identity_headers(
             headers={
                 "Authorization": f"Bearer {token}",
                 "x-user-id": "999",
+                "Idempotency-Key": "auth-test-order",
             },
             json={"items": [{"product_id": 1, "quantity": 1}]},
         )
@@ -181,7 +182,10 @@ def test_order_body_cannot_supply_owner_id(auth_app, token_factory):
     with TestClient(app) as client:
         response = client.post(
             "/orders",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "auth-test-owner",
+            },
             json={
                 "user_id": 999,
                 "items": [{"product_id": 1, "quantity": 1}],

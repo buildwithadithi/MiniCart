@@ -206,7 +206,7 @@ These tests use fake gRPC clients and generated RSA test keys to verify Auth RPC
 
 ## Product Service
 
-The Product Service implements the `AddProduct`, `GetProduct`, `CheckStock`, and `UpdateStock` gRPC methods from `protos/product.proto`. Add-product creates the product and its inventory in one transaction. Stock updates lock the inventory row and reject changes that would result in negative stock. `CheckStock` reports `product_exists=false` and zero stock for an unknown product; product retrieval and stock updates return gRPC `NOT_FOUND` for unknown IDs.
+The Product Service implements the `AddProduct`, `GetProduct`, `CheckStock`, and `UpdateStock` gRPC methods from `protos/product.proto`. Add-product creates the product and its inventory in one transaction. Stock updates lock the inventory row and reject changes that would result in negative stock. Each stock update can include a persistent `operation_id`: repeating the same ID and payload returns the original result without applying the adjustment again, while reusing the ID with a different payload is rejected. `CheckStock` reports `product_exists=false` and zero stock for an unknown product; product retrieval and stock updates return gRPC `NOT_FOUND` for unknown IDs.
 
 Start the server from the project root in Terminal 1 after activating its environment:
 
@@ -232,7 +232,7 @@ All order RPCs require a Bearer JWT in gRPC metadata. Order Service independentl
 
 The Order Service owns the nullable `orders.user_id` column; the additive migration preserves existing orders with no owner assigned and creates no cross-service foreign key.
 
-The Order Service implements `CreateOrder` and `GetOrder` from `protos/order.proto`. It obtains authoritative product prices and availability from Product Service, stores the order and item prices in its own database, updates inventory, and marks the order `CONFIRMED`.
+The Order Service implements `CreateOrder` and `GetOrder` from `protos/order.proto`. It obtains authoritative product prices and availability from Product Service, stores the order and item prices in its own database, updates inventory, and marks the order `CONFIRMED`. `CreateOrder` requests through the Gateway require an `Idempotency-Key`. The key is scoped to the authenticated user and request payload: repeating the same key and payload returns the stored order response, while using that key with a different payload is rejected. Order and idempotency completion are committed together; stock compensation uses a distinct operation ID. If compensation fails, the key is retained in a failed state so replay cannot apply inventory changes again; that case requires manual reconciliation.
 
 The `unit_price` in the current `OrderItemInput` request is ignored: the Product Service price is authoritative. Order responses contain no external service status fields.
 

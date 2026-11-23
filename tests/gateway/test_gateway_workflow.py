@@ -25,6 +25,7 @@ def _add_product(product_stub, created_records, *, price="19.95", stock=10):
 def _create_order(gateway_client, product_id: int, quantity: int):
     return gateway_client.post(
         "/orders",
+        headers={"Idempotency-Key": f"gateway-test-{uuid4().hex}"},
         json={"items": [{"product_id": product_id, "quantity": quantity}]},
     )
 

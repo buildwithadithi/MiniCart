@@ -19,6 +19,26 @@ $tests = @(
         Name = "Gateway Integration"
         Command = "tests\gateway"
         Python = ".\.venv\Scripts\python.exe"
+    },
+    @{
+        Name = "CreateOrder Idempotency Integration"
+        Command = "tests\idempotency\test_create_order_idempotency_integration.py"
+        Python = ".\.venv\Scripts\python.exe"
+    },
+    @{
+        Name = "UpdateStock Idempotency Integration"
+        Command = "tests\idempotency\test_update_stock_idempotency_integration.py"
+        Python = ".\.venv\Scripts\python.exe"
+    },
+    @{
+        Name = "Dedicated gRPC Retry Tests"
+        Command = "tests\test_dedicated_grpc_retries.py"
+        Python = ".\.venv\Scripts\python.exe"
+    },
+    @{
+        Name = "gRPC Retry Tests"
+        Command = "tests\test_grpc_retry.py"
+        Python = ".\.venv\Scripts\python.exe"
     }
 )
 
@@ -33,4 +53,4 @@ foreach ($test in $tests) {
     }
 }
 
-Write-Host "`nAll integration suites passed!" -ForegroundColor Green
+Write-Host "`nAll integration and retry test suites passed!" -ForegroundColor Green

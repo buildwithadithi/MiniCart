@@ -18,14 +18,14 @@ SCHEMA_INITIALIZERS = (
         PROJECT_ROOT / "product-service",
         "models",
         "database",
-        ("products", "inventory"),
+        ("products", "inventory", "processed_stock_operations"),
     ),
     (
         "Order Service",
         PROJECT_ROOT / "order-service",
         "models",
         "database",
-        ("orders", "order_items"),
+        ("orders", "order_items", "order_idempotency"),
     ),
 )
 
