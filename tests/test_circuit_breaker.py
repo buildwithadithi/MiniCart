@@ -13,14 +13,15 @@ from generated.circuit_breaker import (
 
 
 class FakeRpcError(grpc.RpcError):
-    def __init__(self, code):
+    def __init__(self, code, details="controlled circuit-breaker test"):
         self._code = code
+        self._details = details
 
     def code(self):
         return self._code
 
-    def details(self):
-        return "controlled circuit-breaker test"
+    def details(self) -> str:
+        return self._details
 
 
 def test_closed_success_and_failure_threshold():
@@ -252,4 +253,56 @@ def test_successful_retry_closes_half_open_and_breakers_are_independent():
 
     assert result == "ok"
     assert gateway_breaker.state == CircuitState.CLOSED
+    assert product_breaker.state == CircuitState.CLOSED
+
+
+def test_product_circuit_rejection_does_not_fail_gateway_breaker():
+    gateway_breaker = CircuitBreaker(
+        CircuitBreakerConfig(1, 5, 1),
+        name="gateway-order",
+        clock=lambda: 0.0,
+    )
+    product_breaker = CircuitBreaker(
+        CircuitBreakerConfig(1, 5, 1),
+        name="order-product",
+        clock=lambda: 0.0,
+    )
+    product_breaker.record_failure()
+
+    class ProductDependencyError(FakeRpcError):
+        pass
+
+    def predicate(error):
+        details = (error.details() or "").lower()
+        return "circuit breaker is open" not in details
+
+    with pytest.raises(ProductDependencyError):
+        gateway_breaker.execute(
+            lambda: (_ for _ in ()).throw(
+                ProductDependencyError(
+                    grpc.StatusCode.UNAVAILABLE,
+                    "Product Service request failed: Circuit breaker is open.",
+                )
+            ),
+            failure_predicate=predicate,
+        )
+
+    assert gateway_breaker.state == CircuitState.CLOSED
+    assert product_breaker.state == CircuitState.OPEN
+
+
+def test_gateway_open_does_not_open_product_circuit():
+    gateway_breaker = CircuitBreaker(
+        CircuitBreakerConfig(1, 5, 1),
+        name="gateway-order",
+        clock=lambda: 0.0,
+    )
+    product_breaker = CircuitBreaker(
+        CircuitBreakerConfig(1, 5, 1),
+        name="order-product",
+        clock=lambda: 0.0,
+    )
+
+    gateway_breaker.record_failure()
+    assert gateway_breaker.state == CircuitState.OPEN
     assert product_breaker.state == CircuitState.CLOSED

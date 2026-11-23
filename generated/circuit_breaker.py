@@ -122,7 +122,12 @@ class CircuitBreaker:
                 extra={"circuit": self.name},
             )
 
-    def execute(self, operation: Callable[[], _T]) -> _T:
+    def execute(
+        self,
+        operation: Callable[[], _T],
+        *,
+        failure_predicate: Callable[[grpc.RpcError], bool] | None = None,
+    ) -> _T:
         with self._lock:
             self._refresh_open_state()
             if self._state == CircuitState.OPEN:
@@ -142,7 +147,13 @@ class CircuitBreaker:
                 grpc.StatusCode.UNAVAILABLE,
                 grpc.StatusCode.DEADLINE_EXCEEDED,
             ):
-                self.record_failure()
+                should_count = (
+                    failure_predicate(error)
+                    if failure_predicate is not None
+                    else True
+                )
+                if should_count:
+                    self.record_failure()
             raise
         except BaseException:
             raise

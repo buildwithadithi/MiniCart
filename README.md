@@ -1,59 +1,302 @@
 # MiniCart
 
-MiniCart is a Python microservices e-commerce application with service-owned SQLAlchemy models, one PostgreSQL container with separate Authentication, Product, and Order databases, Protocol Buffer contracts, and a FastAPI API Gateway.
+MiniCart is a local microservices e-commerce application built with Python, FastAPI, gRPC, Protocol Buffers, SQLAlchemy, PostgreSQL, and Docker Compose.
 
-## Technology stack
+The implemented system provides account registration and login, product and inventory management, authenticated order creation and retrieval, and bounded retry/circuit-breaker protection for synchronous service calls.
 
-- Python
-- gRPC and Protocol Buffers for internal service contracts
-- FastAPI and Uvicorn for the REST API gateway
-- PostgreSQL, SQLAlchemy 2, and psycopg2-binary
-- Docker Compose for local PostgreSQL
+## Project Overview
 
-Each service has its own `requirements.txt`; see [Environment and dependency management](#environment-and-dependency-management) for local setup.
+The repository contains four running service components:
 
-## Project structure
+| Component | Technology | Default port | Responsibility |
+|---|---|---:|---|
+| API Gateway | FastAPI/Uvicorn | `8000` | Exposes REST endpoints and forwards authentication and order operations over gRPC. |
+| Auth Service | Python/gRPC | `50054` | Registers users, verifies passwords, and issues RS256 JWT access tokens. |
+| Product Service | Python/gRPC | `50051` | Owns products and inventory, including stock updates and stock-operation idempotency. |
+| Order Service | Python/gRPC | `50052` | Owns orders and order items, validates authenticated users, coordinates Product Service calls, and stores CreateOrder idempotency state. |
 
-```text
-minicart/
-├── api-gateway/            # FastAPI REST-to-gRPC API Gateway
-│   ├── gateway/             # Gateway app, request/response schemas, Order gRPC client
-│   └── tests/               # Isolated API Gateway tests
-├── auth-service/            # Account registration, login, and JWT issuance
-│   ├── migrations/          # Additive Authentication schema migrations
-│   ├── tests/                # Isolated Authentication Service tests
-│   ├── server.py             # Authentication Service gRPC server (port 50054)
-│   └── requirements.txt      # Auth-only dependencies
-├── product-service/        # Product/inventory models and DB access
-│   ├── server.py           # Product Service gRPC server
-│   ├── servicer.py         # Product RPC handlers
-│   └── tests/              # Live gRPC/PostgreSQL integration tests
-├── order-service/          # Order service, database access, and gRPC clients
-│   ├── clients/            # Product Service gRPC client
-│   ├── migrations/         # Additive Order schema migrations
-│   ├── server.py           # Order Service gRPC server
-│   ├── servicer.py         # Order RPC handlers and workflow
-│   └── tests/              # Live gRPC/PostgreSQL integration tests
-├── tests/
-│   └── e2e/                # Cross-service gRPC/PostgreSQL workflows
-├── protos/                 # Auth, Product, and Order RPC contracts
-├── generated/              # Generated Python protobuf/gRPC package
-├── docker-compose.yml      # Local PostgreSQL service and named volume
-├── docker/postgres/        # First-run initialization for service databases
-├── initialize_databases.py # Creates and verifies each service's tables
-├── .dockerignore           # Excludes local environments, secrets, and caches
-├── .env.example            # Placeholder local configuration
-├── generate_protos.py      # Reproducible gRPC code generation
-└── requirements.txt        # Complete development dependencies
+PostgreSQL is run by Docker Compose on local port `5432`. It is not an application service in Docker; the four application processes currently run directly under their Python virtual environments.
+
+No implemented Payment Service directory, Payment protobuf contract, Payment database, or payment workflow is currently present in this repository.
+
+## Architecture Overview
+
+```mermaid
+flowchart LR
+    Client[REST client] --> Gateway[API Gateway\nFastAPI :8000]
+
+    Gateway -->|gRPC Register/Login| Auth[Auth Service\n:50054]
+    Gateway -->|gRPC CreateOrder/GetOrder| Order[Order Service\n:50052]
+    Order -->|gRPC GetProduct/CheckStock/UpdateStock| Product[Product Service\n:50051]
+
+    Auth --> AuthDB[(PostgreSQL\nminicart_auth_db)]
+    Product --> ProductDB[(PostgreSQL\nminicart_product_db)]
+    Order --> OrderDB[(PostgreSQL\nminicart_order_db)]
+    Postgres[PostgreSQL container] --> AuthDB
+    Postgres --> ProductDB
+    Postgres --> OrderDB
 ```
 
-Each service defines its own SQLAlchemy `Base`, connects only to its own PostgreSQL database, and owns its tables. The Order Service intentionally does not declare foreign keys to tables owned by other services. The Product Service inventory table references the product table within its own service.
+All downstream application communication shown above is synchronous gRPC. The API Gateway does not connect directly to PostgreSQL.
 
-## Environment and dependency management
+### Service Responsibilities
 
-MiniCart uses Python 3.13 for local development. Create one virtual environment per independently developed service and one root environment for code generation and cross-service testing. Activate only the environment for the component you are working on. The root requirements are the combined development/test toolset; do not install them into each service environment.
+- **API Gateway:** validates REST input and JWTs, forwards the Bearer token and `Idempotency-Key`, translates gRPC statuses to HTTP statuses, and retries selected read-only and CreateOrder RPC calls.
+- **Auth Service:** validates registration data, normalizes email addresses, stores Argon2 password hashes, verifies credentials, and signs JWT access tokens.
+- **Product Service:** manages products and inventory in the product database. `UpdateStock` records a stable operation ID and payload hash so a replay returns the stored stock result instead of deducting inventory twice.
+- **Order Service:** verifies JWT claims, checks authoritative product prices and stock, creates order rows and order items, updates inventory, compensates inventory after failures where applicable, and stores user-scoped CreateOrder idempotency responses.
 
-Create the service and root environments from the project root:
+## Technology Stack
+
+- Python 3.13
+- FastAPI and Uvicorn
+- gRPC and Protocol Buffers
+- PostgreSQL 17
+- SQLAlchemy 2
+- psycopg2-binary
+- PyJWT and RSA keys
+- Argon2 password hashing
+- python-dotenv
+- Docker Compose
+- pytest
+- Pylance/Pyright-compatible Python typing configuration
+
+## Implemented Features
+
+- User registration and login through REST and gRPC.
+- RS256 JWT issuance and independent JWT verification by the Gateway and Order Service.
+- Protected `POST /orders` and `GET /orders/{order_id}` operations.
+- Product creation, retrieval, stock checks, and stock updates.
+- Service-owned PostgreSQL databases and SQLAlchemy models.
+- CreateOrder user-scoped idempotency with payload-hash conflict detection.
+- UpdateStock operation-ID idempotency with atomic inventory and operation-record updates.
+- Bounded gRPC retries with exponential backoff and jitter.
+- Independent circuit breakers for Gateway-to-Order and Order-to-Product communication.
+- Unique test-data cleanup across the service databases.
+- Database, migration, security, idempotency, retry, circuit-breaker, integration, and E2E test suites.
+
+## Fault Tolerance and Reliability
+
+### Retries and Exponential Backoff
+
+The shared retry implementation is [generated/grpc_retry.py](./generated/grpc_retry.py). It uses:
+
+| Setting | Default |
+|---|---:|
+| Maximum attempts | `4` |
+| Initial delay | `0.2` seconds |
+| Multiplier | `2` |
+| Maximum delay | `1.0` second |
+| Jitter ratio | `0.25` |
+
+It retries `UNAVAILABLE` and `DEADLINE_EXCEEDED` where the overall deadline allows another attempt. Permanent statuses such as `INVALID_ARGUMENT`, `NOT_FOUND`, `FAILED_PRECONDITION`, `ALREADY_EXISTS`, `UNAUTHENTICATED`, and `PERMISSION_DENIED` stop the retry sequence.
+
+Retry-protected read/write operations are:
+
+- `GetProduct`
+- `CheckStock`
+- `UpdateStock`
+- Gateway `GetOrder`
+- Gateway `CreateOrder`
+
+CreateOrder and UpdateStock reuse the same request object, metadata, and operation/idempotency identifier on every retry.
+
+### Circuit Breakers
+
+The reusable thread-safe implementation is [generated/circuit_breaker.py](./generated/circuit_breaker.py). It supports `CLOSED`, `OPEN`, and `HALF_OPEN` states.
+
+The two breakers are independent:
+
+- Gateway → Order Service
+- Order Service → Product Service
+
+A logical retry sequence is counted as one circuit-breaker outcome. Permanent gRPC errors do not open a breaker. When OPEN, no downstream gRPC call or retry sequence is started.
+
+### Idempotency
+
+`POST /orders` requires an `Idempotency-Key` header. The Gateway forwards it unchanged to the Order Service. The Order Service scopes the key to the authenticated `sub` claim and compares the request payload hash.
+
+- Reusing the same key and payload returns the stored CreateOrder response.
+- Reusing the key with a different payload returns `ALREADY_EXISTS`, mapped to HTTP `409`.
+- Concurrent duplicates are protected by a database unique constraint.
+- UpdateStock uses a separate stable `operation_id`; Product Service stores the operation payload hash and returned stock value in the same transaction as the inventory update.
+
+### Response-Loss Handling
+
+Test-only gRPC wrappers can simulate a response being lost after the downstream database transaction commits. Existing tests verify that the Gateway or Order Service retries the same logical request and that the replayed idempotent operation does not create duplicate orders or deduct stock twice.
+
+## Project Directory Structure
+
+```text
+MiniCart/
+├── api-gateway/
+│   ├── gateway/
+│   │   ├── auth_client.py
+│   │   ├── grpc_client.py
+│   │   ├── main.py
+│   │   ├── schemas.py
+│   │   └── security.py
+│   ├── tests/
+│   └── requirements.txt
+├── auth-service/
+│   ├── auth_database.py
+│   ├── auth_models.py
+│   ├── auth_security.py
+│   ├── generate_keys.py
+│   ├── server.py
+│   ├── servicer.py
+│   ├── token_issuer.py
+│   ├── tests/
+│   └── requirements.txt
+├── product-service/
+│   ├── database.py
+│   ├── models.py
+│   ├── seed_products.py
+│   ├── server.py
+│   ├── servicer.py
+│   ├── tests/
+│   └── requirements.txt
+├── order-service/
+│   ├── clients/
+│   │   └── product_client.py
+│   ├── database.py
+│   ├── models.py
+│   ├── security.py
+│   ├── security_config.py
+│   ├── server.py
+│   ├── servicer.py
+│   ├── tests/
+│   └── requirements.txt
+├── protos/
+│   ├── auth.proto
+│   ├── order.proto
+│   └── product.proto
+├── generated/
+│   ├── auth_pb2.py
+│   ├── order_pb2.py
+│   ├── product_pb2.py
+│   ├── grpc_retry.py
+│   └── circuit_breaker.py
+├── tests/
+│   ├── circuit_breaker/
+│   ├── database/
+│   ├── e2e/
+│   ├── gateway/
+│   ├── idempotency/
+│   └── security/
+├── docker/postgres/
+├── docker-compose.yml
+├── initialize_databases.py
+├── generate_protos.py
+├── start-minicart.ps1
+├── run-integration-tests.ps1
+├── .env.example
+└── requirements.txt
+
+## Database Architecture
+
+PostgreSQL has one container and separate databases:
+
+| Service | Database | Managed tables |
+|---|---|---|
+| Auth Service | `minicart_auth_db` | `users` |
+| Product Service | `minicart_product_db` | `products`, `inventory`, `processed_stock_operations` |
+| Order Service | `minicart_order_db` | `orders`, `order_items`, `order_idempotency` |
+
+### Ownership Rules
+
+- Each service has its own SQLAlchemy `Base`, engine, and database name.
+- The Gateway does not connect to PostgreSQL.
+- No cross-service foreign key is declared by the Order or Payment-side models.
+- `order_items.product_id` is an integer reference only; it does not declare a foreign key to `products`.
+- `processed_stock_operations.product_id` is an application operation identifier and does not declare a cross-service foreign key.
+
+The Docker Compose script creates the Auth database as `POSTGRES_DB` and creates the Product and Order databases on first PostgreSQL initialization. SQLAlchemy `create_all()` initializes the three service schemas. The repository also contains SQL migration test fixtures, but the service `migrations/` directories referenced by those tests are not currently present in the checkout.
+
+## Prerequisites
+
+- Windows PowerShell
+- Python 3.13
+- Docker Desktop with Docker Compose
+- PostgreSQL-compatible Docker support
+- Network access from local processes to `127.0.0.1`
+
+Optional for test containers: Docker must be able to start temporary PostgreSQL containers.
+
+## Environment Variables and Configuration
+
+Create a local environment file:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Never commit `.env`, private RSA keys, or issued JWTs.
+
+### PostgreSQL
+
+| Variable | Purpose | Example default |
+|---|---|---|
+| `DB_HOST` | PostgreSQL host for local processes | `localhost` |
+| `DB_PORT` | PostgreSQL port | `5432` |
+| `DB_USER` | Shared development database user | `minicart_admin` |
+| `DB_PASSWORD` | Database password | Set locally; no default |
+| `AUTH_DB_NAME` | Auth database | `minicart_auth_db` |
+| `PRODUCT_DB_NAME` | Product database | `minicart_product_db` |
+| `ORDER_DB_NAME` | Order database | `minicart_order_db` |
+
+### Service Addresses
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `AUTH_SERVICE_ADDRESS` | Auth gRPC target | `localhost:50054` |
+| `AUTH_SERVICE_TIMEOUT_SECONDS` | Auth gRPC deadline | `5` |
+| `ORDER_SERVICE_ADDRESS` | Order gRPC target | `localhost:50052` |
+| `ORDER_SERVICE_TIMEOUT_SECONDS` | Order gRPC deadline | `3` |
+| `PRODUCT_SERVICE_ADDRESS` | Product gRPC target | `localhost:50051` |
+| `PRODUCT_SERVICE_TIMEOUT_SECONDS` | Product gRPC deadline | `3` |
+
+Each service also supports matching host and port variables; the address variables take precedence.
+
+### Authentication
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `JWT_PRIVATE_KEY_PATH` | Auth Service RSA private key path | `auth-service/keys/jwt-private.pem` |
+| `JWT_PUBLIC_KEY_PATH` | Verifier RSA public key path | `auth-service/keys/jwt-public.pem` |
+| `JWT_ISSUER` | JWT issuer | `minicart-auth` |
+| `JWT_AUDIENCE` | JWT audience | `minicart-api` |
+| `JWT_ACCESS_TOKEN_SECONDS` | Access-token lifetime | `900` |
+
+### Retry and Circuit Breakers
+
+Retry variables:
+
+| Variable | Default |
+|---|---:|
+| `GRPC_RETRY_MAX_ATTEMPTS` | `4` |
+| `GRPC_RETRY_INITIAL_DELAY_SECONDS` | `0.2` |
+| `GRPC_RETRY_MULTIPLIER` | `2` |
+| `GRPC_RETRY_MAX_DELAY_SECONDS` | `1.0` |
+| `GRPC_RETRY_JITTER_RATIO` | `0.25` |
+
+Gateway → Order circuit breaker:
+
+- `GATEWAY_ORDER_CB_FAILURE_THRESHOLD`
+- `GATEWAY_ORDER_CB_RECOVERY_TIMEOUT_SECONDS`
+- `GATEWAY_ORDER_CB_HALF_OPEN_MAX_CALLS`
+
+Order → Product circuit breaker:
+
+- `ORDER_PRODUCT_CB_FAILURE_THRESHOLD`
+- `ORDER_PRODUCT_CB_RECOVERY_TIMEOUT_SECONDS`
+- `ORDER_PRODUCT_CB_HALF_OPEN_MAX_CALLS`
+
+The circuit breakers default to failure threshold `5`, recovery timeout `15` seconds, and half-open maximum calls `2`.
+
+## Installation and Setup
+
+Create the virtual environments:
 
 ```powershell
 py -3.13 -m venv .venv
@@ -63,57 +306,17 @@ py -3.13 -m venv order-service\.venv
 py -3.13 -m venv api-gateway\.venv
 ```
 
-In PowerShell, activate each environment and install only its requirements:
+Install dependencies:
 
 ```powershell
-# Root project: code generation and cross-service E2E tests
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m pip check
-deactivate
-
-# Authentication Service
-.\auth-service\.venv\Scripts\Activate.ps1
-python -m pip install -r auth-service\requirements.txt
-python -m pip check
-deactivate
-
-# Product Service
-.\product-service\.venv\Scripts\Activate.ps1
-python -m pip install -r product-service\requirements.txt
-python -m pip check
-deactivate
-
-# Order Service
-.\order-service\.venv\Scripts\Activate.ps1
-python -m pip install -r order-service\requirements.txt
-python -m pip check
-deactivate
-
-# API Gateway
-.\api-gateway\.venv\Scripts\Activate.ps1
-python -m pip install -r api-gateway\requirements.txt
-python -m pip check
-deactivate
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\auth-service\.venv\Scripts\python.exe -m pip install -r auth-service\requirements.txt
+.\product-service\.venv\Scripts\python.exe -m pip install -r product-service\requirements.txt
+.\order-service\.venv\Scripts\python.exe -m pip install -r order-service\requirements.txt
+.\api-gateway\.venv\Scripts\python.exe -m pip install -r api-gateway\requirements.txt
 ```
 
-The `.venv` directories are Git-ignored. These are local development environments; Docker containers do not create or copy virtual environments. Application-service Dockerfiles are not part of this project yet; PostgreSQL remains the only Compose service.
-
-Generated gRPC code currently requires `grpcio>=1.81.2` and `protobuf>=6.33.5`. Every component that imports generated modules declares those floors. The root code-generation environment uses `grpcio-tools>=1.81.2,<1.82`, matching the checked-in generated-code version; update the tool constraint and regenerate/test the code together when intentionally upgrading it.
-
-When application images are introduced, each will use its own service requirements. The current Compose file starts PostgreSQL only.
-
-## Authentication and JWT configuration
-
-The Authentication Service owns `users`, validates registration data, stores Argon2 password hashes, verifies logins, and issues short-lived RS256 access tokens. The Gateway and Order Service independently verify the signature, issuer, audience, issued-at time, expiration, and positive numeric `sub` using the public key. The private key is only needed by the Authentication Service.
-
-Create `.env` from the example only if one does not already exist. Otherwise preserve its database settings and add the JWT/Auth variables. Set a non-placeholder database password:
-
-```powershell
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-```
-
-Generate a local development RSA key pair once. The helper refuses to overwrite either existing file:
+Generate RSA keys:
 
 ```powershell
 .\auth-service\.venv\Scripts\python.exe auth-service\generate_keys.py `
@@ -121,255 +324,327 @@ Generate a local development RSA key pair once. The helper refuses to overwrite 
   --public-key auth-service\keys\jwt-public.pem
 ```
 
-Set `JWT_PRIVATE_KEY_PATH` and `JWT_PUBLIC_KEY_PATH` in `.env` to those files. Run isolated Auth Service tests with `auth-service\.venv\Scripts\python.exe -m pytest auth-service\tests\ -v`. Key files and `.env` are Git-ignored; do not commit them. In production, store the signing key in a managed secret store and distribute only the public key to the Gateway and Order Service.
-
-`JWT_ISSUER` defaults to `minicart-auth`, `JWT_AUDIENCE` to `minicart-api`, and `JWT_ACCESS_TOKEN_SECONDS` to `900`. The Gateway reads `AUTH_SERVICE_ADDRESS` (default `localhost:50054`); its timeout is configurable with `AUTH_SERVICE_TIMEOUT_SECONDS`.
-
-### Database migrations and ownership
-
-Authentication owns `minicart_auth_db` and its `users` table. Product owns `minicart_product_db` (`products`, `inventory`); Order owns `minicart_order_db` (`orders`, `order_items`). Set `AUTH_DB_NAME`, `PRODUCT_DB_NAME`, and `ORDER_DB_NAME` to override these local database names. Each service ignores `DB_NAME` and uses only its own service-specific database setting.
-
-The additive Authentication and Order ownership migrations remain for existing deployments. `order-service/migrations/0003_remove_legacy_order_columns.sql` removes obsolete columns from an existing Order database. Apply it manually after the ownership migration; database initialization does not reset or modify existing databases. For a fresh setup, `initialize_databases.py` uses each SQLAlchemy model set to create and verify its tables in its service-owned database. It is safe to rerun:
-
-```powershell
-.\.venv\Scripts\python.exe initialize_databases.py
-```
-
-The Order migration adds nullable `orders.user_id` and an index without a cross-service foreign key. Historical orders in existing deployments remain valid with `user_id IS NULL` and are not visible through authenticated order retrieval because no owner can be established safely.
-
-## FastAPI API Gateway
-
-The API Gateway exposes REST endpoints, forwards registration/login to the Authentication Service, and sends protected order operations to the Order Service over gRPC. It does not connect to PostgreSQL or duplicate order workflow logic.
-
-Start PostgreSQL from the project root:
-
-```powershell
-docker compose up -d postgres
-```
-
-Start each gRPC service in a separate terminal after activating its environment:
-
-```powershell
-.\auth-service\.venv\Scripts\Activate.ps1
-python auth-service/server.py
-```
-
-```powershell
-.\product-service\.venv\Scripts\Activate.ps1
-python product-service/server.py
-```
-
-```powershell
-.\order-service\.venv\Scripts\Activate.ps1
-python order-service/server.py
-```
-
-In another terminal, activate the Gateway environment and start it:
-
-```powershell
-.\api-gateway\.venv\Scripts\Activate.ps1
-python -m uvicorn gateway.main:app --app-dir api-gateway --host 127.0.0.1 --port 8000
-```
-
-The Order Service target defaults to `localhost:50052`. Configure `ORDER_SERVICE_ADDRESS` to override it, or use `ORDER_SERVICE_HOST` and `ORDER_SERVICE_PORT`; `ORDER_SERVICE_TIMEOUT_SECONDS` configures the gRPC deadline.
-
-REST endpoints:
-
-- `GET /health` checks only that the Gateway is responding.
-- `POST /auth/register` accepts `name`, `email`, and `password`.
-- `POST /auth/login` verifies credentials and returns a JWT access token.
-- `POST /orders` requires `Authorization: Bearer <token>` and accepts `{"items":[{"product_id":1,"quantity":2}]}`.
-- `GET /orders/{order_id}` requires the same Bearer authentication and returns only orders owned by the token subject.
-
-The Gateway verifies the JWT before forwarding the exact Bearer token as gRPC metadata. The Order Service verifies that token again and derives the owner from `sub`; it does not trust a request field or identity header. Orders belonging to another user are returned as `NOT_FOUND` to avoid disclosing their existence.
-
-Read-only gRPC calls use bounded retries with exponential backoff:
-
-- `GRPC_RETRY_MAX_ATTEMPTS=4` for 1 initial attempt and 3 retries
-- `GRPC_RETRY_INITIAL_DELAY_SECONDS=0.2`
-- `GRPC_RETRY_MULTIPLIER=2`
-- `GRPC_RETRY_MAX_DELAY_SECONDS=1.0`
-- `GRPC_RETRY_JITTER_RATIO=0.25`
-
-Retries apply only to `ProductService.GetProduct`, `ProductService.CheckStock`, and `OrderService.GetOrder`. They retry only `UNAVAILABLE` and `DEADLINE_EXCEEDED` when enough of the existing RPC deadline remains. Mutating and authentication RPCs are not retried.
-
-Open Swagger UI at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs). The OpenAPI schema is at [http://127.0.0.1:8000/openapi.json](http://127.0.0.1:8000/openapi.json).
-
-Run the Gateway tests from the project root:
-
-```powershell
-.\api-gateway\.venv\Scripts\Activate.ps1
-python -m pytest api-gateway\tests\ -v
-```
-
-These tests use fake gRPC clients and generated RSA test keys to verify Auth RPC conversion, JWT rejection/acceptance, Bearer forwarding, REST validation, HTTP error mapping, and Swagger/OpenAPI availability without requiring running microservices.
-
-## Product Service
-
-The Product Service implements the `AddProduct`, `GetProduct`, `CheckStock`, and `UpdateStock` gRPC methods from `protos/product.proto`. Add-product creates the product and its inventory in one transaction. Stock updates lock the inventory row and reject changes that would result in negative stock. Each stock update can include a persistent `operation_id`: repeating the same ID and payload returns the original result without applying the adjustment again, while reusing the ID with a different payload is rejected. `CheckStock` reports `product_exists=false` and zero stock for an unknown product; product retrieval and stock updates return gRPC `NOT_FOUND` for unknown IDs.
-
-Start the server from the project root in Terminal 1 after activating its environment:
-
-```powershell
-.\product-service\.venv\Scripts\Activate.ps1
-python product-service/server.py
-```
-
-In Terminal 2, activate the Product Service environment and run its persistent gRPC integration tests:
-
-```powershell
-.\product-service\.venv\Scripts\Activate.ps1
-python -m pytest product-service\tests\ -v
-```
-
-The tests require PostgreSQL (`docker compose up -d postgres`) and the Product Service server to be running. They connect using a real gRPC client, verify database persistence, and remove only the uniquely created test products and their inventory records after each test. Set `PRODUCT_SERVICE_ADDRESS` to override the test target (default `127.0.0.1:50051`).
-
-Earlier Product Service verification: all 11 gRPC/PostgreSQL integration test cases passed, including validation, inventory creation, stock updates, not-found behavior, and persisted changes.
-
-## Order Service
-
-All order RPCs require a Bearer JWT in gRPC metadata. Order Service independently verifies the signature and claims, stores the token subject in `orders.user_id`, and only returns orders owned by that subject; other users receive `NOT_FOUND`.
-
-The Order Service owns the nullable `orders.user_id` column; the additive migration preserves existing orders with no owner assigned and creates no cross-service foreign key.
-
-The Order Service implements `CreateOrder` and `GetOrder` from `protos/order.proto`. It obtains authoritative product prices and availability from Product Service, stores the order and item prices in its own database, updates inventory, and marks the order `CONFIRMED`. `CreateOrder` requests through the Gateway require an `Idempotency-Key`. The key is scoped to the authenticated user and request payload: repeating the same key and payload returns the stored order response, while using that key with a different payload is rejected. Order and idempotency completion are committed together; stock compensation uses a distinct operation ID. If compensation fails, the key is retained in a failed state so replay cannot apply inventory changes again; that case requires manual reconciliation.
-
-The `unit_price` in the current `OrderItemInput` request is ignored: the Product Service price is authoritative. Order responses contain no external service status fields.
-
-For an existing Order database, apply the ownership migration and then remove legacy order columns from the project root:
-
-```powershell
-Get-Content order-service/migrations/0002_add_user_id.sql | docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
-Get-Content order-service/migrations/0003_remove_legacy_order_columns.sql | docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
-```
-
-The ownership migration adds a nullable column and index; existing orders are preserved with no owner assigned and there is no cross-service foreign key. The legacy-column cleanup is idempotent and only affects the Order database.
-
-Start PostgreSQL from the project root:
-
-```powershell
-docker compose up -d postgres
-```
-
-Start each service in its own terminal after activating that service's environment:
-
-```powershell
-.\product-service\.venv\Scripts\Activate.ps1
-python product-service/server.py
-```
-
-```powershell
-.\order-service\.venv\Scripts\Activate.ps1
-python order-service/server.py
-```
-
-Default gRPC ports are Product `50051`, Order `50052`, and Authentication `50054`. Order requires the configured public JWT key at startup. Service addresses, ports, and downstream timeouts are configurable with the variables in `.env.example`.
-
-With PostgreSQL, Auth, Product, and Order Services running and migrations applied, use the Order Service environment for its live integration tests:
-
-```powershell
-.\order-service\.venv\Scripts\Activate.ps1
-python -m pytest order-service\tests\ -v
-```
-
-The tests use real gRPC clients and the running Product Service. They create uniquely named products and clean up only their own order, product, inventory, and item records. Product Service outage coverage uses an isolated temporary Order Service gRPC listener.
-
-Order, Product, and PostgreSQL do not share a distributed transaction. If an inventory update fails, the Order Service compensates prior successful stock updates and marks the order failed; a rollback failure is logged and surfaced as an internal error. If the order cannot be confirmed after inventory updates, it attempts the same compensation. No retries or circuit breakers are used.
-
-## End-to-end integration tests
-
-The authenticated Order test fixtures register a temporary user through Auth Service, log in to obtain a real token, and attach it to the Order RPC metadata. Run these tests only after all three gRPC services and the ownership migration are ready.
-
-Start PostgreSQL and all three gRPC services as described above, then run end-to-end workflows using the root environment:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-python -m pytest tests\e2e\ -v
-```
-
-These tests use real gRPC clients against Product `50051`, Order `50052`, and Authentication `50054`, and obtain a real JWT from Auth Service. The success example creates a product at `19.95` with stock `10`, places an order for `2`, verifies the `39.90` total and `CONFIRMED` status, and confirms stock falls to `8`.
-
-Expected rows during a successful flow: one product and inventory row (stock updated from `10` to `8`), and one `CONFIRMED` order with its item rows. Test-created rows are removed during teardown.
-
-Error coverage includes missing products, insufficient stock, invalid quantities, and Product Service unavailability. The tests verify records across `products`, `inventory`, `orders`, and `order_items`, then delete only records created by the tests. The unavailability case uses an isolated temporary Order Service gRPC listener while calling the real remaining services.
-
-## Root-level Gateway integration tests
-
-This suite also requires the Auth Service. Its fixtures register/login through the real Gateway and attach the resulting Bearer token to all order requests.
-
-`tests/gateway/` exercises order creation and retrieval through real HTTP requests to the running FastAPI Gateway. It registers and logs in a fresh test user through the Gateway, then sends the resulting token with order operations. Gateway calls the real Order Service over gRPC; Order Service calls Product Service. Tests use direct Product gRPC for setup and independent verification. Fixtures do not start or stop services and clean up only test-owned rows.
-
-Start PostgreSQL and the Auth, Product, Order, and Gateway processes manually in separate terminals as described above. Then, in a root-project terminal:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-python -m pytest tests\gateway\ -v
-```
-
-By default the tests use Product `127.0.0.1:50051`, Order `127.0.0.1:50052`, Authentication `127.0.0.1:50054`, and Gateway `http://127.0.0.1:8000`.
-
-The Product Service unavailable case needs an extra manually started isolated Order Service and Gateway process. This avoids disrupting shared services: run the isolated Order instance on a distinct port with Product Service set to a known-closed local port, then point a separate Gateway instance at that Order port. Configure `MINICART_PRODUCT_UNAVAILABLE_GATEWAY_URL` in the test terminal. If it is unset, only the outage test is skipped.
-
-Example Product Service outage setup (each code block in its own terminal):
-
-```powershell
-$env:ORDER_SERVICE_PORT = "50053"
-$env:PRODUCT_SERVICE_ADDRESS = "127.0.0.1:59991"
-.\order-service\.venv\Scripts\Activate.ps1
-python order-service/server.py
-```
-
-```powershell
-$env:ORDER_SERVICE_ADDRESS = "127.0.0.1:50053"
-$env:ORDER_SERVICE_TIMEOUT_SECONDS = "10"
-.\api-gateway\.venv\Scripts\Activate.ps1
-python -m uvicorn gateway.main:app --app-dir api-gateway --host 127.0.0.1 --port 8001
-```
-
-In the terminal running pytest, enable the optional real outage cases:
-
-```powershell
-$env:MINICART_PRODUCT_UNAVAILABLE_GATEWAY_URL = "http://127.0.0.1:8001"
-.\.venv\Scripts\Activate.ps1
-python -m pytest tests\gateway\ -v
-```
-
-## PostgreSQL
-
-Copy `.env.example` to `.env` and set a non-placeholder `DB_PASSWORD`. The `.env` file is ignored by Git.
-
-The Compose PostgreSQL container bootstraps `minicart_auth_db` and runs `docker/postgres/init-databases.sql` to create `minicart_product_db` and `minicart_order_db`. The script runs only when PostgreSQL initializes a new data directory. The named volume is `minicart_service_postgres_data`; this setup does not remove or reset it. If that existing volume contains `minicart_payment_db`, it remains there and is not dropped by this refactor.
-
-Start PostgreSQL and initialize service-owned schemas without resetting the existing volume:
+Start PostgreSQL:
 
 ```powershell
 docker compose up -d postgres
 docker compose ps
 docker compose exec postgres pg_isready -U minicart_admin -d minicart_auth_db
+```
+
+Initialize service schemas:
+
+```powershell
 .\.venv\Scripts\python.exe initialize_databases.py
 ```
 
-Verify database names:
+Generate or refresh protobuf modules:
 
 ```powershell
-docker compose exec postgres psql -U minicart_admin -d postgres -Atc "SELECT datname FROM pg_database WHERE datname IN ('minicart_auth_db','minicart_product_db','minicart_order_db') ORDER BY datname"
+.\.venv\Scripts\python.exe generate_protos.py
 ```
 
-The database listens on local port `5432`. Local service processes connect through `DB_HOST=localhost`; a service container on the Compose network should use `DB_HOST=postgres`. Credentials (`DB_USER` and `DB_PASSWORD`) are shared for this development setup, but each service's SQLAlchemy URL selects only its own database. Stopping PostgreSQL without removing the volume preserves its existing data.
-
-The database initializer uses the root Python environment to import each service's model metadata in a separate process and create tables in the configured database. It does not create cross-service foreign keys or connect the API Gateway to PostgreSQL.
-
-## gRPC code generation
-
-Generate the Python protobuf and gRPC modules into the `generated` package:
+Optionally seed product data:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python generate_protos.py
+.\.venv\Scripts\python.exe product-service\seed_products.py
 ```
 
-The script also generates protobuf `.pyi` files so Pylance can resolve generated message classes. The generated gRPC modules use package-relative imports so they can be imported as `generated.auth_pb2`, `generated.product_pb2`, and `generated.order_pb2`.
+The seed script is available but skipped product names already present. It requires the Product Service to be running.
 
-## Setup verification
+## Running the Application
 
-Run `docker compose ps` to check PostgreSQL health, `initialize_databases.py` to initialize and verify service-owned schemas, and the per-service tests described above when you choose to run them. The Auth Service uses `AUTH_DB_NAME`; Product and Order use their respective `*_DB_NAME` settings.
+PostgreSQL is the only Docker Compose service. The application processes run locally.
+
+Terminal 1:
+
+```powershell
+.\auth-service\.venv\Scripts\python.exe auth-service\server.py
+```
+
+Terminal 2:
+
+```powershell
+.\product-service\.venv\Scripts\python.exe product-service\server.py
+```
+
+Terminal 3:
+
+```powershell
+.\order-service\.venv\Scripts\python.exe order-service\server.py
+```
+
+Terminal 4:
+
+```powershell
+.\api-gateway\.venv\Scripts\python.exe -m uvicorn gateway.main:app --app-dir api-gateway --host 127.0.0.1 --port 8000
+```
+
+The repository also provides [start-minicart.ps1](./start-minicart.ps1). It starts PostgreSQL and launches the four application processes. It does not start Dockerized application containers.
+
+## API Documentation
+
+Swagger UI is available at `http://127.0.0.1:8000/docs`, and OpenAPI JSON is available at `http://127.0.0.1:8000/openapi.json`.
+
+### `GET /health`
+
+Checks that the Gateway process is responding. It does not perform database or downstream gRPC health checks.
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/health"
+```
+
+Response:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+### `POST /auth/register`
+
+Creates an Auth Service account.
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/auth/register" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"name":"Example User","email":"user@example.com","password":"example-password"}'
+```
+
+Password length must be 12–128 characters.
+
+Response:
+
+```json
+{
+  "id": 1,
+  "name": "Example User",
+  "email": "user@example.com",
+  "created_at": "2026-01-01T00:00:00Z"
+}
+```
+
+### `POST /auth/login`
+
+Authenticates a registered user and returns a JWT.
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/auth/login" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"email":"user@example.com","password":"example-password"}'
+```
+
+Response:
+
+```json
+{
+  "access_token": "<JWT>",
+  "token_type": "Bearer",
+  "expires_in": 900
+}
+```
+
+### `POST /orders`
+
+Requires:
+
+- `Authorization: Bearer <JWT>`
+- `Idempotency-Key: <1-128-character key>`
+
+The idempotency key may contain letters, digits, `.`, `_`, and `-`, and must begin with a letter or digit.
+
+```powershell
+$headers = @{
+  Authorization = "Bearer <JWT>"
+  "Idempotency-Key" = "order-example-001"
+}
+
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/orders" `
+  -Method Post `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body '{"items":[{"product_id":1,"quantity":2}]}'
+```
+
+Response:
+
+```json
+{
+  "id": 1,
+  "total_amount": "39.90",
+  "status": "CONFIRMED",
+  "created_at": "2026-01-01T00:00:00Z",
+  "items": [
+    {
+      "id": 1,
+      "product_id": 1,
+      "quantity": 2,
+      "unit_price": "19.95"
+    }
+  ]
+}
+```
+
+### `GET /orders/{order_id}`
+
+Requires `Authorization: Bearer <JWT>`. The Order Service returns only an order owned by the authenticated user.
+
+```powershell
+$headers = @{ Authorization = "Bearer <JWT>" }
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/orders/1" `
+  -Headers $headers
+```
+
+## gRPC APIs
+
+Protocol contracts are in [protos/](./protos/).
+
+| Service | RPCs |
+|---|---|
+| Auth | `Register`, `Login` |
+| Product | `AddProduct`, `GetProduct`, `CheckStock`, `UpdateStock` |
+| Order | `CreateOrder`, `GetOrder` |
+
+Generated Python modules are in [generated/](./generated/). Regenerate them with `generate_protos.py`.
+
+## Testing
+
+The project separates unit-style tests from integration tests that require running processes or PostgreSQL.
+
+### Unit and Mock-Based Tests
+
+```powershell
+# Gateway
+.\api-gateway\.venv\Scripts\python.exe -m pytest api-gateway\tests -v
+
+# Authentication
+.\auth-service\.venv\Scripts\python.exe -m pytest auth-service\tests -v
+
+# Order authorization
+.\order-service\.venv\Scripts\python.exe -m pytest order-service\tests\test_order_authorization.py -v
+
+# Retry and circuit-breaker unit tests
+.\.venv\Scripts\python.exe -m pytest tests\test_grpc_retry.py tests\test_dedicated_grpc_retries.py tests\test_circuit_breaker.py -v
+```
+
+### Product and Order Integration Tests
+
+Require PostgreSQL and the relevant running gRPC services:
+
+```powershell
+docker compose up -d postgres
+.\.venv\Scripts\python.exe initialize_databases.py
+```
+
+```powershell
+.\product-service\.venv\Scripts\python.exe -m pytest product-service\tests -v
+```
+
+```powershell
+.\order-service\.venv\Scripts\python.exe -m pytest order-service\tests -v
+```
+
+### Database Tests
+
+Database isolation and initialization tests use temporary Docker PostgreSQL containers with temporary databases and a tmpfs data directory:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\database -v
+```
+
+Migration test files reference migration scripts that are not currently present in the checkout, so the migration-focused cases cannot be considered implemented migration coverage until those SQL files exist.
+
+### End-to-End and Gateway Integration Tests
+
+Start PostgreSQL, Auth, Product, Order, and Gateway processes before running:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\e2e -v
+.\.venv\Scripts\python.exe -m pytest tests\gateway -v
+```
+
+### Idempotency and Response-Loss Tests
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\idempotency -v
+.\.venv\Scripts\python.exe -m pytest tests\test_create_order_gateway_response_loss.py -v
+.\.venv\Scripts\python.exe -m pytest tests\test_update_stock_mutation_response_loss.py -v
+```
+
+Integration tests require the documented running services and `.env` database credentials. Test cleanup is targeted to records created by the test fixtures.
+
+### Circuit-Breaker Outage and Recovery Tests
+
+The dedicated real-gRPC outage tests use test-owned temporary gRPC servers:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\circuit_breaker -v
+```
+
+These tests do not stop or modify existing developer-owned service processes.
+
+The repository also contains [run-integration-tests.ps1](./run-integration-tests.ps1), but it does not include every newer focused suite. The individual commands above are authoritative for the newly added test groups.
+
+## Error Handling and Status Mapping
+
+### REST Status Mapping
+
+| gRPC status | HTTP status |
+|---|---:|
+| `INVALID_ARGUMENT`, `OUT_OF_RANGE` request rejection | `400` or `422` |
+| `NOT_FOUND` | `404` |
+| `RESOURCE_EXHAUSTED`, `FAILED_PRECONDITION`, `ALREADY_EXISTS` | `409` |
+| `UNAUTHENTICATED` | `401` |
+| `PERMISSION_DENIED` | `403` |
+| `UNAVAILABLE` | `503` |
+| `DEADLINE_EXCEEDED` | `504` |
+
+The Gateway sanitizes downstream details and does not expose internal gRPC error text.
+
+### gRPC Statuses
+
+Implemented service handlers use statuses including:
+
+- `INVALID_ARGUMENT` for malformed input.
+- `NOT_FOUND` for missing users, products, or orders.
+- `ALREADY_EXISTS` for idempotency or uniqueness conflicts.
+- `FAILED_PRECONDITION` for invalid stock state or failed replay conditions.
+- `RESOURCE_EXHAUSTED` for insufficient stock.
+- `UNAVAILABLE` for database or temporary downstream failures.
+- `DEADLINE_EXCEEDED` for gRPC deadline expiration.
+- `UNAUTHENTICATED` for missing or invalid JWT credentials.
+
+## Security Considerations
+
+- Keep `.env` and RSA private/public key files outside version control.
+- Use separate database credentials and permissions if this project is deployed beyond local development.
+- Gateway and Order Service verify JWT issuer, audience, signature, expiration, and subject claims.
+- User ownership is derived from `sub`; identity headers are not trusted.
+- Passwords are hashed with Argon2.
+- REST error responses avoid exposing downstream gRPC details.
+- POST `/orders` is protected by both JWT authentication and an idempotency key.
+- Circuit-breaker state is local to each process; it is not shared across replicas.
+- The current database setup uses a shared development role and service-specific database names.
+
+## Future Improvements
+
+The following are not implemented:
+
+- Docker images and containerized application startup.
+- A Payment Service or payment database.
+- Distributed payment processing or compensation.
+- A complete migration framework and migration directories.
+- Kubernetes deployment.
+- Kafka or RabbitMQ.
+- Redis.
+- Distributed tracing or metrics.
+- Separate PostgreSQL roles and permissions for each service.
+
+Cross-service delivery is currently synchronous. Production deployment would require managed secrets, service discovery, TLS, observability, backup/restore procedures, and a defined migration rollout process.
+
+## Additional Information
+
+This README documents the current repository and intentionally distinguishes implemented behavior from test gaps or planned work. Where migration scripts are referenced by tests but missing from the checkout, this is reported rather than described as completed migration functionality.

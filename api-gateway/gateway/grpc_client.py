@@ -16,6 +16,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
 
+def _gateway_order_failure_is_order_outage(error: grpc.RpcError) -> bool:
+    details = (error.details() or "").lower()
+    return "circuit breaker is open" not in details
+
+
 class OrderServiceClient:
     def __init__(self) -> None:
         host = os.getenv("ORDER_SERVICE_HOST", "localhost")
@@ -51,7 +56,8 @@ class OrderServiceClient:
                 rpc_name="OrderService.CreateOrder",
                 timeout_seconds=self.timeout,
                 before_retry=self._circuit_breaker.is_retry_allowed,
-            )
+            ),
+            failure_predicate=_gateway_order_failure_is_order_outage,
         )
 
     def get_order(
@@ -67,7 +73,8 @@ class OrderServiceClient:
                 rpc_name="OrderService.GetOrder",
                 timeout_seconds=self.timeout,
                 before_retry=self._circuit_breaker.is_retry_allowed,
-            )
+            ),
+            failure_predicate=_gateway_order_failure_is_order_outage,
         )
 
     def close(self) -> None:
